@@ -8,7 +8,7 @@ from datetime import datetime
 
 app = FastAPI(
     title="Trading Assistant API",
-    version="3.0.0"
+    version="3.1.0"
 )
 
 app.add_middleware(
@@ -48,7 +48,7 @@ def td_request(endpoint: str, params: dict):
         return None
 
 
-def get_candles_df(symbol: str, interval: str, limit: int = 200):
+def get_candles_df(symbol: str, interval: str, limit: int = 100):
     """Récupère les bougies sous forme de DataFrame pandas"""
     data = td_request("time_series", {
         "symbol": symbol,
@@ -72,12 +72,10 @@ def get_candles_df(symbol: str, interval: str, limit: int = 200):
 
 # ─── Indicateurs techniques ─────────────────────────────────
 def ema(series, period):
-    """Exponential Moving Average"""
     return series.ewm(span=period, adjust=False).mean()
 
 
 def rsi(series, period=14):
-    """Relative Strength Index"""
     delta = series.diff()
     gain = delta.where(delta > 0, 0).rolling(window=period).mean()
     loss = -delta.where(delta < 0, 0).rolling(window=period).mean()
@@ -86,7 +84,6 @@ def rsi(series, period=14):
 
 
 def macd(series, fast=12, slow=26, signal=9):
-    """MACD"""
     ema_fast = ema(series, fast)
     ema_slow = ema(series, slow)
     macd_line = ema_fast - ema_slow
@@ -96,7 +93,6 @@ def macd(series, fast=12, slow=26, signal=9):
 
 
 def atr(df, period=14):
-    """Average True Range (volatilité)"""
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
@@ -105,7 +101,6 @@ def atr(df, period=14):
 
 
 def bollinger_bands(series, period=20, std=2):
-    """Bandes de Bollinger"""
     sma = series.rolling(window=period).mean()
     std_dev = series.rolling(window=period).std()
     upper = sma + (std_dev * std)
@@ -113,23 +108,19 @@ def bollinger_bands(series, period=20, std=2):
     return upper, sma, lower
 
 
-def find_support_resistance(df, window=20):
-    """Détecte les supports et résistances"""
+def find_support_resistance(df, window=10):
     highs = df["high"].rolling(window=window, center=True).max()
     lows = df["low"].rolling(window=window, center=True).min()
-    
     resistances = df["high"][df["high"] == highs].dropna().tail(3).tolist()
     supports = df["low"][df["low"] == lows].dropna().tail(3).tolist()
-    
     return supports, resistances
 
 
 # ─── Analyse complète ───────────────────────────────────────
 def analyze_asset(symbol: str, interval: str = "1h"):
-    """Analyse technique complète d'un actif"""
-    df = get_candles_df(symbol, interval, limit=200)
+    df = get_candles_df(symbol, interval, limit=100)
     
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 30:
         return None
     
     close = df["close"]
@@ -138,7 +129,7 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     # Indicateurs
     ema_20 = ema(close, 20).iloc[-1]
     ema_50 = ema(close, 50).iloc[-1]
-    ema_200 = ema(close, 200).iloc[-1] if len(close) >= 200 else None
+    ema_100 = ema(close, 100).iloc[-1] if len(close) >= 100 else None
     
     rsi_val = rsi(close, 14).iloc[-1]
     macd_line, signal_line, hist = macd(close)
@@ -153,9 +144,9 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     
     # ─── Détection de tendance ─────────────────
     trend = "neutral"
-    if ema_200 and current_price > ema_50 > ema_200:
+    if ema_100 and current_price > ema_50 > ema_100:
         trend = "bullish"
-    elif ema_200 and current_price < ema_50 < ema_200:
+    elif ema_100 and current_price < ema_50 < ema_100:
         trend = "bearish"
     elif current_price > ema_20 > ema_50:
         trend = "bullish"
@@ -166,7 +157,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     score = 0
     reasons = []
     
-    # Tendance
     if trend == "bullish":
         score += 25
         reasons.append("Tendance haussière (EMA)")
@@ -174,7 +164,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         score -= 25
         reasons.append("Tendance baissière (EMA)")
     
-    # RSI
     if rsi_val < 30:
         score += 20
         reasons.append(f"RSI en survente ({rsi_val:.1f})")
@@ -184,7 +173,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     elif 40 <= rsi_val <= 60:
         reasons.append(f"RSI neutre ({rsi_val:.1f})")
     
-    # MACD
     if macd_val > macd_signal and macd_hist > 0:
         score += 20
         reasons.append("MACD haussier (croisement)")
@@ -192,7 +180,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         score -= 20
         reasons.append("MACD baissier (croisement)")
     
-    # Bollinger
     if current_price < bb_lower.iloc[-1]:
         score += 15
         reasons.append("Prix sous la Bollinger inférieure")
@@ -211,7 +198,7 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         signal = "WAIT"
         confidence = 50 + abs(score) // 2
     
-    # ─── Calcul SL / TP (basé sur ATR) ─────────
+    # ─── Calcul SL / TP ────────────────────────
     entry = current_price
     if signal == "BUY":
         stop_loss = round(entry - (atr_val * 1.5), 5)
@@ -242,7 +229,7 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         "indicators": {
             "ema_20": round(float(ema_20), 5),
             "ema_50": round(float(ema_50), 5),
-            "ema_200": round(float(ema_200), 5) if ema_200 else None,
+            "ema_100": round(float(ema_100), 5) if ema_100 else None,
             "rsi": round(float(rsi_val), 2),
             "macd": round(float(macd_val), 5),
             "macd_signal": round(float(macd_signal), 5),
@@ -265,7 +252,7 @@ async def root():
     return {
         "status": "online",
         "message": "Trading Assistant API is running 🚀",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "data_provider": "Twelve Data",
         "features": ["prices", "candles", "technical_analysis", "signals"]
     }
@@ -310,7 +297,6 @@ async def get_all_prices():
 
 @app.get("/api/v1/analyze/{asset}")
 async def analyze(asset: str, timeframe: str = "1h"):
-    """Analyse technique complète d'un actif"""
     asset = asset.upper()
     
     if asset not in ASSETS:
@@ -335,28 +321,22 @@ async def analyze(asset: str, timeframe: str = "1h"):
 
 @app.get("/api/v1/signals")
 async def get_all_signals(min_confidence: int = 70):
-    """Récupère les signaux pour tous les actifs (H1 + confirmation H4)"""
     signals = {}
     
     for name, symbol in ASSETS.items():
-        # Analyse H1
         h1_result = analyze_asset(symbol, "1h")
-        # Analyse H4 (confirmation)
         h4_result = analyze_asset(symbol, "4h")
         
         if h1_result is None:
             signals[name] = {"status": "error", "signal": "WAIT"}
             continue
         
-        # Confirmation H4
         confirmed = False
         if h4_result:
             if h1_result["signal"] == h4_result["signal"] and h1_result["signal"] != "WAIT":
                 confirmed = True
-                # Bonus de confiance si H4 confirme
                 h1_result["confidence"] = min(h1_result["confidence"] + 10, 95)
         
-        # Filtrage par confiance
         if h1_result["signal"] != "WAIT" and h1_result["confidence"] >= min_confidence:
             signals[name] = {
                 "status": "ok",
