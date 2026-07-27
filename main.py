@@ -1,11 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
+import requests
 from datetime import datetime
 
 app = FastAPI(
     title="Trading Assistant API",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 app.add_middleware(
@@ -24,14 +25,37 @@ ASSETS = {
     "XAUUSD": "GC=F"
 }
 
+# Session avec User-Agent (contourne le blocage Yahoo)
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/120.0.0.0 Safari/537.36'
+    })
+    return session
+
+
 def fetch_data(symbol: str, period: str = "5d", interval: str = "1h"):
-    """Récupère les données yfinance de manière fiable"""
+    """Récupère les données yfinance avec session personnalisée"""
     try:
-        ticker = yf.Ticker(symbol)
+        session = get_session()
+        ticker = yf.Ticker(symbol, session=session)
         data = ticker.history(period=period, interval=interval)
+        
+        if data.empty:
+            # Fallback avec download direct
+            data = yf.download(
+                symbol,
+                period=period,
+                interval=interval,
+                progress=False,
+                session=session
+            )
+        
         return data
     except Exception as e:
-        print(f"Erreur yfinance pour {symbol}: {e}")
+        print(f"❌ Erreur yfinance pour {symbol}: {e}")
         return None
 
 
@@ -40,7 +64,7 @@ async def root():
     return {
         "status": "online",
         "message": "Trading Assistant API is running 🚀",
-        "version": "1.2.0"
+        "version": "1.3.0"
     }
 
 
@@ -116,10 +140,9 @@ async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
     if asset not in ASSETS:
         raise HTTPException(status_code=404, detail="Asset not found")
     
-    # Mapping timeframes → (interval, period)
     tf_map = {
         "1h": ("1h", "1mo"),
-        "4h": ("1h", "3mo"),   # on récupère du 1h qu'on regroupera plus tard
+        "4h": ("1h", "3mo"),
         "1d": ("1d", "1y")
     }
     
@@ -150,4 +173,4 @@ async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
         "timeframe": timeframe,
         "count": len(candles),
         "candles": candles
-                          }
+                            }
