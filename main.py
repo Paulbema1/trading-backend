@@ -11,7 +11,7 @@ from datetime import datetime
 
 app = FastAPI(
     title="Trading Assistant API",
-    version="4.0.0"
+    version="4.1.0"
 )
 
 app.add_middleware(
@@ -40,9 +40,11 @@ TIMEFRAMES = {
 }
 
 RSS_FEEDS = [
-    "https://www.forexlive.com/feed/news",
-    "https://www.fxstreet.com/rss/news",
-    "https://www.dailyfx.com/feeds/market-news"
+    "https://www.investing.com/rss/news_1.rss",
+    "https://www.investing.com/rss/news_301.rss",
+    "https://www.investing.com/rss/news_285.rss",
+    "https://feeds.marketwatch.com/marketwatch/topstories/",
+    "https://www.forexlive.com/feed",
 ]
 
 
@@ -313,34 +315,61 @@ def detect_impact(text: str) -> str:
 
 
 def fetch_news_from_rss(url: str, limit: int = 10) -> list:
-    """Récupère les news d'un flux RSS"""
+    """Récupère les news d'un flux RSS - version robuste"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml, */*'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
-        root = ET.fromstring(response.content)
-        items = root.findall('.//item')[:limit]
+        content = response.content
+        
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError:
+            content_str = response.text
+            content_str = re.sub(r'&(?!(?:amp|lt|gt|quot|apos);)', '&amp;', content_str)
+            root = ET.fromstring(content_str.encode('utf-8'))
+        
+        items = root.findall('.//item')
+        if not items:
+            items = root.findall('.//{http://www.w3.org/2005/Atom}entry')
+        
+        items = items[:limit]
         
         news = []
         for item in items:
-            title = item.find('title')
-            description = item.find('description')
-            link = item.find('link')
-            pub_date = item.find('pubDate')
+            title_elem = item.find('title')
+            desc_elem = item.find('description')
+            link_elem = item.find('link')
+            date_elem = item.find('pubDate')
             
-            title_text = title.text if title is not None else ""
-            desc_text = clean_html(description.text) if description is not None else ""
+            if title_elem is None:
+                title_elem = item.find('{http://www.w3.org/2005/Atom}title')
+            if desc_elem is None:
+                desc_elem = item.find('{http://www.w3.org/2005/Atom}summary')
+            if link_elem is None:
+                link_elem = item.find('{http://www.w3.org/2005/Atom}link')
+            if date_elem is None:
+                date_elem = item.find('{http://www.w3.org/2005/Atom}published')
+            
+            title_text = title_elem.text if title_elem is not None and title_elem.text else ""
+            desc_text = clean_html(desc_elem.text) if desc_elem is not None and desc_elem.text else ""
+            link_text = link_elem.text if link_elem is not None and link_elem.text else ""
+            pub_date = date_elem.text if date_elem is not None and date_elem.text else ""
+            
+            if not title_text:
+                continue
             
             full_text = f"{title_text} {desc_text}"
             
             news.append({
                 "title": title_text,
                 "description": desc_text[:200] + "..." if len(desc_text) > 200 else desc_text,
-                "link": link.text if link is not None else "",
-                "published": pub_date.text if pub_date is not None else "",
+                "link": link_text,
+                "published": pub_date,
                 "currencies": detect_currency(full_text),
                 "sentiment": detect_sentiment(full_text),
                 "impact": detect_impact(full_text)
@@ -358,7 +387,7 @@ async def root():
     return {
         "status": "online",
         "message": "Trading Assistant API is running 🚀",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "data_provider": "Twelve Data",
         "features": ["prices", "candles", "technical_analysis", "signals", "news"]
     }
