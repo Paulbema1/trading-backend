@@ -4,11 +4,14 @@ import requests
 import os
 import pandas as pd
 import numpy as np
+import xml.etree.ElementTree as ET
+from html import unescape
+import re
 from datetime import datetime
 
 app = FastAPI(
     title="Trading Assistant API",
-    version="3.1.0"
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -35,6 +38,12 @@ TIMEFRAMES = {
     "4h": "4h",
     "1d": "1day"
 }
+
+RSS_FEEDS = [
+    "https://www.forexlive.com/feed/news",
+    "https://www.fxstreet.com/rss/news",
+    "https://www.dailyfx.com/feeds/market-news"
+]
 
 
 # ─── Fonction Twelve Data ───────────────────────────────────
@@ -126,7 +135,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     close = df["close"]
     current_price = float(close.iloc[-1])
     
-    # Indicateurs
     ema_20 = ema(close, 20).iloc[-1]
     ema_50 = ema(close, 50).iloc[-1]
     ema_100 = ema(close, 100).iloc[-1] if len(close) >= 100 else None
@@ -142,7 +150,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     
     supports, resistances = find_support_resistance(df)
     
-    # ─── Détection de tendance ─────────────────
     trend = "neutral"
     if ema_100 and current_price > ema_50 > ema_100:
         trend = "bullish"
@@ -153,7 +160,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     elif current_price < ema_20 < ema_50:
         trend = "bearish"
     
-    # ─── Score de signal ───────────────────────
     score = 0
     reasons = []
     
@@ -187,7 +193,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         score -= 15
         reasons.append("Prix au-dessus de la Bollinger supérieure")
     
-    # ─── Décision finale ───────────────────────
     if score >= 40:
         signal = "BUY"
         confidence = min(50 + score, 95)
@@ -198,7 +203,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
         signal = "WAIT"
         confidence = 50 + abs(score) // 2
     
-    # ─── Calcul SL / TP ────────────────────────
     entry = current_price
     if signal == "BUY":
         stop_loss = round(entry - (atr_val * 1.5), 5)
@@ -246,15 +250,117 @@ def analyze_asset(symbol: str, interval: str = "1h"):
     }
 
 
+# ─── Actualités (RSS) ───────────────────────────────────────
+def clean_html(text: str) -> str:
+    """Nettoie le HTML"""
+    if not text:
+        return ""
+    text = re.sub(r'<[^>]+>', '', text)
+    text = unescape(text)
+    return text.strip()
+
+
+def detect_currency(text: str) -> list:
+    """Détecte les devises mentionnées dans le texte"""
+    currencies = []
+    text_upper = text.upper()
+    
+    if "EUR" in text_upper or "EURO" in text_upper:
+        currencies.append("EUR")
+    if "USD" in text_upper or "DOLLAR" in text_upper or "FED" in text_upper:
+        currencies.append("USD")
+    if "GBP" in text_upper or "POUND" in text_upper or "STERLING" in text_upper:
+        currencies.append("GBP")
+    if "JPY" in text_upper or "YEN" in text_upper:
+        currencies.append("JPY")
+    if "GOLD" in text_upper or "XAU" in text_upper:
+        currencies.append("XAU")
+    
+    return currencies if currencies else ["GENERAL"]
+
+
+def detect_sentiment(text: str) -> str:
+    """Détection basique du sentiment"""
+    text_lower = text.lower()
+    
+    bullish_words = ["rise", "surge", "gain", "rally", "up", "high", "boost", "strong", "growth", "positive"]
+    bearish_words = ["fall", "drop", "decline", "down", "low", "weak", "loss", "crash", "negative", "concern"]
+    
+    bull_score = sum(1 for w in bullish_words if w in text_lower)
+    bear_score = sum(1 for w in bearish_words if w in text_lower)
+    
+    if bull_score > bear_score:
+        return "bullish"
+    elif bear_score > bull_score:
+        return "bearish"
+    return "neutral"
+
+
+def detect_impact(text: str) -> str:
+    """Détermine l'impact d'une news"""
+    text_lower = text.lower()
+    
+    high_impact = ["fed", "ecb", "boj", "boe", "rate", "inflation", "gdp", "nfp", "cpi", "fomc"]
+    medium_impact = ["employment", "retail", "manufacturing", "trade", "consumer"]
+    
+    for w in high_impact:
+        if w in text_lower:
+            return "HIGH"
+    for w in medium_impact:
+        if w in text_lower:
+            return "MEDIUM"
+    return "LOW"
+
+
+def fetch_news_from_rss(url: str, limit: int = 10) -> list:
+    """Récupère les news d'un flux RSS"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')[:limit]
+        
+        news = []
+        for item in items:
+            title = item.find('title')
+            description = item.find('description')
+            link = item.find('link')
+            pub_date = item.find('pubDate')
+            
+            title_text = title.text if title is not None else ""
+            desc_text = clean_html(description.text) if description is not None else ""
+            
+            full_text = f"{title_text} {desc_text}"
+            
+            news.append({
+                "title": title_text,
+                "description": desc_text[:200] + "..." if len(desc_text) > 200 else desc_text,
+                "link": link.text if link is not None else "",
+                "published": pub_date.text if pub_date is not None else "",
+                "currencies": detect_currency(full_text),
+                "sentiment": detect_sentiment(full_text),
+                "impact": detect_impact(full_text)
+            })
+        
+        return news
+    except Exception as e:
+        print(f"❌ Erreur RSS {url}: {e}")
+        return []
+
+
 # ─── Endpoints ──────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "message": "Trading Assistant API is running 🚀",
-        "version": "3.1.0",
+        "version": "4.0.0",
         "data_provider": "Twelve Data",
-        "features": ["prices", "candles", "technical_analysis", "signals"]
+        "features": ["prices", "candles", "technical_analysis", "signals", "news"]
     }
 
 
@@ -390,4 +496,26 @@ async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
         "timeframe": timeframe,
         "count": len(candles),
         "candles": candles
+    }
+
+
+@app.get("/api/v1/news")
+async def get_news(limit: int = 20, currency: str = None):
+    """Récupère les actualités forex"""
+    all_news = []
+    
+    for feed_url in RSS_FEEDS:
+        news = fetch_news_from_rss(feed_url, limit=10)
+        all_news.extend(news)
+    
+    if currency:
+        currency = currency.upper()
+        all_news = [n for n in all_news if currency in n["currencies"]]
+    
+    all_news = all_news[:limit]
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "count": len(all_news),
+        "news": all_news
     }
