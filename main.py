@@ -7,11 +7,11 @@ import numpy as np
 import xml.etree.ElementTree as ET
 from html import unescape
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = FastAPI(
     title="Trading Assistant API",
-    version="4.1.0"
+    version="4.2.0"
 )
 
 app.add_middleware(
@@ -47,6 +47,10 @@ RSS_FEEDS = [
     "https://www.forexlive.com/feed",
 ]
 
+ECONOMIC_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+TRACKED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "XAU"]
+
 
 # ─── Fonction Twelve Data ───────────────────────────────────
 def td_request(endpoint: str, params: dict):
@@ -60,7 +64,6 @@ def td_request(endpoint: str, params: dict):
 
 
 def get_candles_df(symbol: str, interval: str, limit: int = 100):
-    """Récupère les bougies sous forme de DataFrame pandas"""
     data = td_request("time_series", {
         "symbol": symbol,
         "interval": interval,
@@ -127,7 +130,6 @@ def find_support_resistance(df, window=10):
     return supports, resistances
 
 
-# ─── Analyse complète ───────────────────────────────────────
 def analyze_asset(symbol: str, interval: str = "1h"):
     df = get_candles_df(symbol, interval, limit=100)
     
@@ -254,7 +256,6 @@ def analyze_asset(symbol: str, interval: str = "1h"):
 
 # ─── Actualités (RSS) ───────────────────────────────────────
 def clean_html(text: str) -> str:
-    """Nettoie le HTML"""
     if not text:
         return ""
     text = re.sub(r'<[^>]+>', '', text)
@@ -263,7 +264,6 @@ def clean_html(text: str) -> str:
 
 
 def detect_currency(text: str) -> list:
-    """Détecte les devises mentionnées dans le texte"""
     currencies = []
     text_upper = text.upper()
     
@@ -282,7 +282,6 @@ def detect_currency(text: str) -> list:
 
 
 def detect_sentiment(text: str) -> str:
-    """Détection basique du sentiment"""
     text_lower = text.lower()
     
     bullish_words = ["rise", "surge", "gain", "rally", "up", "high", "boost", "strong", "growth", "positive"]
@@ -299,7 +298,6 @@ def detect_sentiment(text: str) -> str:
 
 
 def detect_impact(text: str) -> str:
-    """Détermine l'impact d'une news"""
     text_lower = text.lower()
     
     high_impact = ["fed", "ecb", "boj", "boe", "rate", "inflation", "gdp", "nfp", "cpi", "fomc"]
@@ -315,7 +313,6 @@ def detect_impact(text: str) -> str:
 
 
 def fetch_news_from_rss(url: str, limit: int = 10) -> list:
-    """Récupère les news d'un flux RSS - version robuste"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -381,15 +378,52 @@ def fetch_news_from_rss(url: str, limit: int = 10) -> list:
         return []
 
 
+# ─── Calendrier Économique ──────────────────────────────────
+def fetch_economic_calendar():
+    """Récupère le calendrier économique depuis ForexFactory"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(ECONOMIC_CALENDAR_URL, headers=headers, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        events = []
+        for event in data:
+            currency = event.get("country", "").upper()
+            
+            # Filtrer par devises suivies
+            if currency not in TRACKED_CURRENCIES:
+                continue
+            
+            impact = event.get("impact", "Low").upper()
+            
+            events.append({
+                "title": event.get("title", ""),
+                "currency": currency,
+                "date": event.get("date", ""),
+                "impact": impact,
+                "forecast": event.get("forecast", "") or "---",
+                "previous": event.get("previous", "") or "---",
+                "actual": event.get("actual", "") or "---"
+            })
+        
+        return events
+    except Exception as e:
+        print(f"❌ Erreur calendrier économique: {e}")
+        return []
+
+
 # ─── Endpoints ──────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "message": "Trading Assistant API is running 🚀",
-        "version": "4.1.0",
+        "version": "4.2.0",
         "data_provider": "Twelve Data",
-        "features": ["prices", "candles", "technical_analysis", "signals", "news"]
+        "features": ["prices", "candles", "technical_analysis", "signals", "news", "economic_calendar"]
     }
 
 
@@ -530,7 +564,6 @@ async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
 
 @app.get("/api/v1/news")
 async def get_news(limit: int = 20, currency: str = None):
-    """Récupère les actualités forex"""
     all_news = []
     
     for feed_url in RSS_FEEDS:
@@ -548,3 +581,23 @@ async def get_news(limit: int = 20, currency: str = None):
         "count": len(all_news),
         "news": all_news
     }
+
+
+@app.get("/api/v1/calendar")
+async def get_calendar(currency: str = None, impact: str = None):
+    """Récupère le calendrier économique de la semaine"""
+    events = fetch_economic_calendar()
+    
+    if currency:
+        currency = currency.upper()
+        events = [e for e in events if e["currency"] == currency]
+    
+    if impact:
+        impact = impact.upper()
+        events = [e for e in events if e["impact"] == impact]
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "count": len(events),
+        "events": events
+        }
