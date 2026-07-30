@@ -8,10 +8,11 @@ import xml.etree.ElementTree as ET
 from html import unescape
 import re
 from datetime import datetime, timedelta
+import google.generativeai as genai
 
 app = FastAPI(
-    title="Trading Assistant API",
-    version="4.2.0"
+    title="TradeVision AI API",
+    version="5.0.0"
 )
 
 app.add_middleware(
@@ -24,13 +25,37 @@ app.add_middleware(
 
 # ─── Configuration ──────────────────────────────────────────
 API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 BASE_URL = "https://api.twelvedata.com"
+
+# Configuration Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    GEMINI_MODEL = None
 
 ASSETS = {
     "EURUSD": "EUR/USD",
     "GBPUSD": "GBP/USD",
     "USDJPY": "USD/JPY",
     "XAUUSD": "XAU/USD"
+}
+
+# Mapping actif → devises impliquées
+ASSET_CURRENCIES = {
+    "EURUSD": ["EUR", "USD"],
+    "GBPUSD": ["GBP", "USD"],
+    "USDJPY": ["USD", "JPY"],
+    "XAUUSD": ["XAU", "USD"]
+}
+
+# Direction d'impact : si base fort → BUY, si quote fort → SELL
+ASSET_BASE_QUOTE = {
+    "EURUSD": ("EUR", "USD"),
+    "GBPUSD": ("GBP", "USD"),
+    "USDJPY": ("USD", "JPY"),
+    "XAUUSD": ("XAU", "USD")
 }
 
 TIMEFRAMES = {
@@ -50,6 +75,10 @@ RSS_FEEDS = [
 ECONOMIC_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 TRACKED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "XAU"]
+
+# Cache simple pour éviter trop d'appels Gemini
+GEMINI_CACHE = {}
+CACHE_DURATION = 900  # 15 minutes
 
 
 # ─── Fonction Twelve Data ───────────────────────────────────
@@ -267,13 +296,13 @@ def detect_currency(text: str) -> list:
     currencies = []
     text_upper = text.upper()
     
-    if "EUR" in text_upper or "EURO" in text_upper:
+    if "EUR" in text_upper or "EURO" in text_upper or "ECB" in text_upper or "BCE" in text_upper:
         currencies.append("EUR")
-    if "USD" in text_upper or "DOLLAR" in text_upper or "FED" in text_upper:
+    if "USD" in text_upper or "DOLLAR" in text_upper or "FED" in text_upper or "FOMC" in text_upper:
         currencies.append("USD")
-    if "GBP" in text_upper or "POUND" in text_upper or "STERLING" in text_upper:
+    if "GBP" in text_upper or "POUND" in text_upper or "STERLING" in text_upper or "BOE" in text_upper:
         currencies.append("GBP")
-    if "JPY" in text_upper or "YEN" in text_upper:
+    if "JPY" in text_upper or "YEN" in text_upper or "BOJ" in text_upper:
         currencies.append("JPY")
     if "GOLD" in text_upper or "XAU" in text_upper:
         currencies.append("XAU")
@@ -284,8 +313,8 @@ def detect_currency(text: str) -> list:
 def detect_sentiment(text: str) -> str:
     text_lower = text.lower()
     
-    bullish_words = ["rise", "surge", "gain", "rally", "up", "high", "boost", "strong", "growth", "positive"]
-    bearish_words = ["fall", "drop", "decline", "down", "low", "weak", "loss", "crash", "negative", "concern"]
+    bullish_words = ["rise", "surge", "gain", "rally", "up", "high", "boost", "strong", "growth", "positive", "beat", "hawkish", "raise"]
+    bearish_words = ["fall", "drop", "decline", "down", "low", "weak", "loss", "crash", "negative", "concern", "miss", "dovish", "cut"]
     
     bull_score = sum(1 for w in bullish_words if w in text_lower)
     bear_score = sum(1 for w in bearish_words if w in text_lower)
@@ -300,8 +329,8 @@ def detect_sentiment(text: str) -> str:
 def detect_impact(text: str) -> str:
     text_lower = text.lower()
     
-    high_impact = ["fed", "ecb", "boj", "boe", "rate", "inflation", "gdp", "nfp", "cpi", "fomc"]
-    medium_impact = ["employment", "retail", "manufacturing", "trade", "consumer"]
+    high_impact = ["fed", "ecb", "boj", "boe", "rate", "inflation", "gdp", "nfp", "cpi", "fomc", "recession", "war"]
+    medium_impact = ["employment", "retail", "manufacturing", "trade", "consumer", "housing"]
     
     for w in high_impact:
         if w in text_lower:
@@ -380,7 +409,6 @@ def fetch_news_from_rss(url: str, limit: int = 10) -> list:
 
 # ─── Calendrier Économique ──────────────────────────────────
 def fetch_economic_calendar():
-    """Récupère le calendrier économique depuis ForexFactory"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -393,7 +421,6 @@ def fetch_economic_calendar():
         for event in data:
             currency = event.get("country", "").upper()
             
-            # Filtrer par devises suivies
             if currency not in TRACKED_CURRENCIES:
                 continue
             
@@ -411,193 +438,161 @@ def fetch_economic_calendar():
         
         return events
     except Exception as e:
-        print(f"❌ Erreur calendrier économique: {e}")
+        print(f"❌ Erreur calendrier: {e}")
         return []
 
 
-# ─── Endpoints ──────────────────────────────────────────────
-@app.get("/")
-async def root():
-    return {
-        "status": "online",
-        "message": "Trading Assistant API is running 🚀",
-        "version": "4.2.0",
-        "data_provider": "Twelve Data",
-        "features": ["prices", "candles", "technical_analysis", "signals", "news", "economic_calendar"]
-    }
-
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "api_key_configured": bool(API_KEY)
-    }
-
-
-@app.get("/api/v1/price/{asset}")
-async def get_price(asset: str):
-    asset = asset.upper()
-    if asset not in ASSETS:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    
-    data = td_request("price", {"symbol": ASSETS[asset]})
-    if not data or "price" not in data:
-        raise HTTPException(status_code=503, detail=f"No data: {data}")
-    
-    return {
-        "asset": asset,
-        "price": float(data["price"]),
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-
-@app.get("/api/v1/prices")
-async def get_all_prices():
-    prices = {}
-    for name, symbol in ASSETS.items():
-        data = td_request("price", {"symbol": symbol})
-        if data and "price" in data:
-            prices[name] = {"price": float(data["price"]), "status": "ok"}
-        else:
-            prices[name] = {"status": "error"}
-    return {"timestamp": datetime.utcnow().isoformat(), "prices": prices}
-
-
-@app.get("/api/v1/analyze/{asset}")
-async def analyze(asset: str, timeframe: str = "1h"):
-    asset = asset.upper()
-    
-    if asset not in ASSETS:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    
-    if timeframe not in TIMEFRAMES:
-        raise HTTPException(status_code=400, detail="Invalid timeframe")
-    
-    result = analyze_asset(ASSETS[asset], TIMEFRAMES[timeframe])
-    
-    if result is None:
-        raise HTTPException(status_code=503, detail="Analysis failed - not enough data")
-    
-    return {
-        "asset": asset,
-        "symbol": ASSETS[asset],
-        "timeframe": timeframe,
-        "timestamp": datetime.utcnow().isoformat(),
-        **result
-    }
-
-
-@app.get("/api/v1/signals")
-async def get_all_signals(min_confidence: int = 70):
-    signals = {}
-    
-    for name, symbol in ASSETS.items():
-        h1_result = analyze_asset(symbol, "1h")
-        h4_result = analyze_asset(symbol, "4h")
-        
-        if h1_result is None:
-            signals[name] = {"status": "error", "signal": "WAIT"}
-            continue
-        
-        confirmed = False
-        if h4_result:
-            if h1_result["signal"] == h4_result["signal"] and h1_result["signal"] != "WAIT":
-                confirmed = True
-                h1_result["confidence"] = min(h1_result["confidence"] + 10, 95)
-        
-        if h1_result["signal"] != "WAIT" and h1_result["confidence"] >= min_confidence:
-            signals[name] = {
-                "status": "ok",
-                "h4_confirmed": confirmed,
-                **h1_result
-            }
-        else:
-            signals[name] = {
-                "status": "wait",
-                "signal": "WAIT",
-                "confidence": h1_result["confidence"],
-                "reason": "Confiance insuffisante ou pas d'opportunité"
-            }
-    
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "min_confidence": min_confidence,
-        "signals": signals
-    }
-
-
-@app.get("/api/v1/candles/{asset}")
-async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
-    asset = asset.upper()
-    if asset not in ASSETS:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    if timeframe not in TIMEFRAMES:
-        raise HTTPException(status_code=400, detail="Invalid timeframe")
-    
-    data = td_request("time_series", {
-        "symbol": ASSETS[asset],
-        "interval": TIMEFRAMES[timeframe],
-        "outputsize": limit
-    })
-    
-    if not data or "values" not in data:
-        raise HTTPException(status_code=503, detail="No data")
-    
-    values = list(reversed(data["values"]))
-    candles = [{
-        "time": v["datetime"],
-        "open": float(v["open"]),
-        "high": float(v["high"]),
-        "low": float(v["low"]),
-        "close": float(v["close"]),
-        "volume": float(v.get("volume", 0))
-    } for v in values]
-    
-    return {
-        "asset": asset,
-        "timeframe": timeframe,
-        "count": len(candles),
-        "candles": candles
-    }
-
-
-@app.get("/api/v1/news")
-async def get_news(limit: int = 20, currency: str = None):
-    all_news = []
-    
-    for feed_url in RSS_FEEDS:
-        news = fetch_news_from_rss(feed_url, limit=10)
-        all_news.extend(news)
-    
-    if currency:
-        currency = currency.upper()
-        all_news = [n for n in all_news if currency in n["currencies"]]
-    
-    all_news = all_news[:limit]
-    
-    return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "count": len(all_news),
-        "news": all_news
-    }
-
-
-@app.get("/api/v1/calendar")
-async def get_calendar(currency: str = None, impact: str = None):
-    """Récupère le calendrier économique de la semaine"""
+def get_upcoming_events(hours_ahead: int = 24, currencies: list = None):
+    """Récupère les événements à venir dans X heures"""
     events = fetch_economic_calendar()
+    now = datetime.utcnow()
+    upcoming = []
     
-    if currency:
-        currency = currency.upper()
-        events = [e for e in events if e["currency"] == currency]
+    for event in events:
+        try:
+            event_date_str = event["date"].split("-04:00")[0]
+            event_time = datetime.fromisoformat(event_date_str)
+            
+            diff = (event_time - now).total_seconds() / 3600
+            
+            if 0 < diff <= hours_ahead:
+                if currencies and event["currency"] not in currencies:
+                    continue
+                
+                event["hours_until"] = round(diff, 1)
+                upcoming.append(event)
+        except Exception:
+            continue
     
-    if impact:
-        impact = impact.upper()
-        events = [e for e in events if e["impact"] == impact]
+    return sorted(upcoming, key=lambda x: x.get("hours_until", 999))
+
+
+def interpret_calendar_result(event: dict) -> dict:
+    """Interprète le résultat d'un événement économique"""
+    forecast = event.get("forecast", "---")
+    actual = event.get("actual", "---")
+    previous = event.get("previous", "---")
+    
+    if actual == "---" or actual == "":
+        return {
+            "interpretation": "PENDING",
+            "impact_direction": "NEUTRAL",
+            "description": "Résultat pas encore publié"
+        }
+    
+    try:
+        actual_num = float(re.sub(r'[^\d.-]', '', str(actual)))
+        forecast_num = float(re.sub(r'[^\d.-]', '', str(forecast))) if forecast != "---" else None
+        
+        if forecast_num is None:
+            return {
+                "interpretation": "PUBLISHED",
+                "impact_direction": "NEUTRAL",
+                "description": f"Résultat: {actual}"
+            }
+        
+        # Détermine si "meilleur" = "plus haut" ou "plus bas" selon le type d'événement
+        title_lower = event["title"].lower()
+        higher_is_better = not any(w in title_lower for w in ["unemployment", "chômage", "jobless", "claims"])
+        
+        diff_pct = ((actual_num - forecast_num) / abs(forecast_num) * 100) if forecast_num != 0 else 0
+        
+        if abs(diff_pct) < 2:
+            return {
+                "interpretation": "AS_EXPECTED",
+                "impact_direction": "NEUTRAL",
+                "description": f"Conforme aux attentes ({actual} vs {forecast})"
+            }
+        elif (diff_pct > 0 and higher_is_better) or (diff_pct < 0 and not higher_is_better):
+            return {
+                "interpretation": "BETTER_THAN_EXPECTED",
+                "impact_direction": "BULLISH_" + event["currency"],
+                "description": f"Meilleur que prévu ({actual} vs {forecast}) → {event['currency']} renforcé"
+            }
+        else:
+            return {
+                "interpretation": "WORSE_THAN_EXPECTED",
+                "impact_direction": "BEARISH_" + event["currency"],
+                "description": f"Pire que prévu ({actual} vs {forecast}) → {event['currency']} affaibli"
+            }
+    except Exception:
+        return {
+            "interpretation": "PUBLISHED",
+            "impact_direction": "NEUTRAL",
+            "description": f"Résultat: {actual}"
+        }
+
+
+# ─── Analyseur d'impact News ────────────────────────────────
+def analyze_news_impact(asset: str, news_list: list) -> dict:
+    """Analyse l'impact combiné des news sur un actif"""
+    currencies = ASSET_CURRENCIES.get(asset, [])
+    base, quote = ASSET_BASE_QUOTE.get(asset, (None, None))
+    
+    if not currencies:
+        return {"score": 0, "direction": "NEUTRAL", "count": 0}
+    
+    relevant_news = [
+        n for n in news_list 
+        if any(c in n.get("currencies", []) for c in currencies)
+    ]
+    
+    if not relevant_news:
+        return {
+            "score": 0,
+            "direction": "NEUTRAL",
+            "count": 0,
+            "bullish_count": 0,
+            "bearish_count": 0,
+            "high_impact_count": 0
+        }
+    
+    base_score = 0
+    quote_score = 0
+    high_impact = 0
+    bullish = 0
+    bearish = 0
+    
+    for news in relevant_news:
+        sentiment = news.get("sentiment", "neutral")
+        impact = news.get("impact", "LOW")
+        news_currencies = news.get("currencies", [])
+        
+        weight = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}.get(impact, 1)
+        
+        if impact == "HIGH":
+            high_impact += 1
+        
+        for currency in news_currencies:
+            if currency == base:
+                if sentiment == "bullish":
+                    base_score += weight
+                    bullish += 1
+                elif sentiment == "bearish":
+                    base_score -= weight
+                    bearish += 1
+            elif currency == quote:
+                if sentiment == "bullish":
+                    quote_score += weight
+                    bullish += 1
+                elif sentiment == "bearish":
+                    quote_score -= weight
+                    bearish += 1
+    
+    # Impact sur la paire = force base - force quote
+    net_score = base_score - quote_score
+    
+    if net_score > 3:
+        direction = "BULLISH"
+    elif net_score < -3:
+        direction = "BEARISH"
+    else:
+        direction = "NEUTRAL"
     
     return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "count": len(events),
-        "events": events
-        }
+        "score": net_score,
+        "direction": direction,
+        "count": len(relevant_news),
+        "bullish_count": bullish,
+        "bearish_count": bearish,
+        "high_impact_count": high
