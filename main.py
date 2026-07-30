@@ -16,7 +16,7 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
-app = FastAPI(title="TradeVision AI", version="5.0.2")
+app = FastAPI(title="TradeVision AI", version="5.0.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,7 +36,7 @@ if GEMINI_AVAILABLE and GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
         GEMINI_MODEL = genai.GenerativeModel('gemini-1.5-flash')
     except Exception as e:
-        print(f"Gemini init error: {e}")
+        print("Gemini init error:", e)
 
 ASSETS = {
     "EURUSD": "EUR/USD",
@@ -79,7 +79,7 @@ def td_request(endpoint, params):
         response = requests.get(BASE_URL + "/" + endpoint, params=params, timeout=10)
         return response.json()
     except Exception as e:
-        print("Erreur TD: " + str(e))
+        print("Erreur TD:", e)
         return None
 
 
@@ -142,7 +142,6 @@ def find_support_resistance(df, window=10):
     supports = df["low"][df["low"] == lows].dropna().tail(3).tolist()
     return supports, resistances
 
-
 def analyze_asset(symbol, interval="1h"):
     df = get_candles_df(symbol, interval, limit=100)
     if df is None or len(df) < 30:
@@ -184,10 +183,10 @@ def analyze_asset(symbol, interval="1h"):
     
     if rsi_val < 30:
         score += 20
-        reasons.append("RSI survente " + str(round(rsi_val, 1)))
+        reasons.append("RSI survente")
     elif rsi_val > 70:
         score -= 20
-        reasons.append("RSI surachat " + str(round(rsi_val, 1)))
+        reasons.append("RSI surachat")
     
     if macd_val > macd_sig and macd_hist > 0:
         score += 20
@@ -225,7 +224,10 @@ def analyze_asset(symbol, interval="1h"):
         tp2 = round(entry - (atr_val * 3), 5)
         tp3 = round(entry - (atr_val * 4), 5)
     else:
-        sl = tp1 = tp2 = tp3 = None
+        sl = None
+        tp1 = None
+        tp2 = None
+        tp3 = None
     
     return {
         "signal": signal,
@@ -279,15 +281,23 @@ def detect_currency(text):
         currencies.append("JPY")
     if "GOLD" in t or "XAU" in t:
         currencies.append("XAU")
-    return currencies if currencies else ["GENERAL"]
+    if not currencies:
+        currencies = ["GENERAL"]
+    return currencies
 
 
 def detect_sentiment(text):
     t = text.lower()
-    bull = ["rise", "surge", "gain", "rally", "up", "high", "strong", "positive", "beat", "hawkish"]
-    bear = ["fall", "drop", "decline", "down", "low", "weak", "loss", "negative", "miss", "dovish"]
-    bs = sum(1 for w in bull if w in t)
-    br = sum(1 for w in bear if w in t)
+    bull_words = ["rise", "surge", "gain", "rally", "up", "high", "strong", "positive", "beat", "hawkish"]
+    bear_words = ["fall", "drop", "decline", "down", "low", "weak", "loss", "negative", "miss", "dovish"]
+    bs = 0
+    br = 0
+    for w in bull_words:
+        if w in t:
+            bs += 1
+    for w in bear_words:
+        if w in t:
+            br += 1
     if bs > br:
         return "bullish"
     if br > bs:
@@ -332,10 +342,21 @@ def fetch_news_from_rss(url, limit=10):
             link_elem = item.find('link')
             date_elem = item.find('pubDate')
             
-            title_text = title_elem.text if title_elem is not None and title_elem.text else ""
-            desc_text = clean_html_text(desc_elem.text) if desc_elem is not None and desc_elem.text else ""
-            link_text = link_elem.text if link_elem is not None and link_elem.text else ""
-            pub_date = date_elem.text if date_elem is not None and date_elem.text else ""
+            title_text = ""
+            if title_elem is not None and title_elem.text:
+                title_text = title_elem.text
+            
+            desc_text = ""
+            if desc_elem is not None and desc_elem.text:
+                desc_text = clean_html_text(desc_elem.text)
+            
+            link_text = ""
+            if link_elem is not None and link_elem.text:
+                link_text = link_elem.text
+            
+            pub_date = ""
+            if date_elem is not None and date_elem.text:
+                pub_date = date_elem.text
             
             if not title_text:
                 continue
@@ -352,7 +373,7 @@ def fetch_news_from_rss(url, limit=10):
             })
         return news
     except Exception as e:
-        print("RSS error: " + str(e))
+        print("RSS error:", e)
         return []
 
 
@@ -378,7 +399,7 @@ def fetch_economic_calendar():
             })
         return events
     except Exception as e:
-        print("Cal error: " + str(e))
+        print("Cal error:", e)
         return []
 
 
@@ -400,17 +421,30 @@ def get_upcoming_events(hours_ahead=24, currencies=None):
             continue
     return sorted(upcoming, key=lambda x: x.get("hours_until", 999))
 
-
 def analyze_news_impact(asset, news_list):
     currencies = ASSET_CURRENCIES.get(asset, [])
     base, quote = ASSET_BASE_QUOTE.get(asset, (None, None))
     
-    empty = {"score": 0, "direction": "NEUTRAL", "count": 0, "bullish_count": 0, "bearish_count": 0, "high_impact_count": 0}
+    empty = {
+        "score": 0,
+        "direction": "NEUTRAL",
+        "count": 0,
+        "bullish_count": 0,
+        "bearish_count": 0,
+        "high_impact_count": 0
+    }
     
     if not currencies:
         return empty
     
-    relevant = [n for n in news_list if any(c in n.get("currencies", []) for c in currencies)]
+    relevant = []
+    for n in news_list:
+        news_curr = n.get("currencies", [])
+        for c in currencies:
+            if c in news_curr:
+                relevant.append(n)
+                break
+    
     if not relevant:
         return empty
     
@@ -424,7 +458,12 @@ def analyze_news_impact(asset, news_list):
         sent = news.get("sentiment", "neutral")
         imp = news.get("impact", "LOW")
         news_curr = news.get("currencies", [])
-        weight = 3 if imp == "HIGH" else (2 if imp == "MEDIUM" else 1)
+        
+        weight = 1
+        if imp == "HIGH":
+            weight = 3
+        elif imp == "MEDIUM":
+            weight = 2
         
         if imp == "HIGH":
             high_impact += 1
@@ -446,7 +485,13 @@ def analyze_news_impact(asset, news_list):
                     bearish += 1
     
     net = base_score - quote_score
-    direction = "BULLISH" if net > 3 else ("BEARISH" if net < -3 else "NEUTRAL")
+    
+    if net > 3:
+        direction = "BULLISH"
+    elif net < -3:
+        direction = "BEARISH"
+    else:
+        direction = "NEUTRAL"
     
     return {
         "score": net,
@@ -460,12 +505,28 @@ def analyze_news_impact(asset, news_list):
 
 def analyze_calendar_impact(asset, upcoming_events):
     currencies = ASSET_CURRENCIES.get(asset, [])
-    relevant = [e for e in upcoming_events if e.get("currency") in currencies]
+    relevant = []
+    for e in upcoming_events:
+        if e.get("currency") in currencies:
+            relevant.append(e)
     
-    imminent = [e for e in relevant if e.get("hours_until", 999) <= 2 and ("HIGH" in e.get("impact", "").upper() or "ELEV" in e.get("impact", "").upper())]
-    upcoming_h = [e for e in relevant if 2 < e.get("hours_until", 999) <= 12 and ("HIGH" in e.get("impact", "").upper() or "ELEV" in e.get("impact", "").upper())]
+    imminent = []
+    upcoming_h = []
+    for e in relevant:
+        hours = e.get("hours_until", 999)
+        imp = e.get("impact", "").upper()
+        is_high = "HIGH" in imp or "ELEV" in imp
+        if hours <= 2 and is_high:
+            imminent.append(e)
+        elif 2 < hours <= 12 and is_high:
+            upcoming_h.append(e)
     
-    risk = "HIGH" if imminent else ("MEDIUM" if upcoming_h else "LOW")
+    if imminent:
+        risk = "HIGH"
+    elif upcoming_h:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
     
     return {
         "total_events": len(relevant),
@@ -490,30 +551,35 @@ def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_tit
     if not GEMINI_MODEL:
         return default
     
-    cache_key = asset + "_" + str(technical.get('signal')) + "_" + str(int(datetime.utcnow().timestamp() // 900))
+    ts_bucket = int(datetime.utcnow().timestamp() // 900)
+    cache_key = asset + "_" + str(technical.get('signal')) + "_" + str(ts_bucket)
+    
     if cache_key in GEMINI_CACHE:
         return GEMINI_CACHE[cache_key]
     
     display_name = ASSETS.get(asset, asset)
-    titles_text = "\n".join(["- " + t[:100] for t in news_titles[:5]])
+    
+    titles_text = ""
+    for t in news_titles[:5]:
+        titles_text += "- " + t[:100] + "\n"
     
     prompt = "Tu es un analyste Forex professionnel.\n\n"
     prompt += "ACTIF: " + display_name + "\n\n"
     prompt += "TECHNIQUE:\n"
     prompt += "- Signal: " + str(technical.get('signal', 'N/A')) + "\n"
-    prompt += "- Confiance: " + str(technical.get('confidence', 0)) + "%\n"
+    prompt += "- Confiance: " + str(technical.get('confidence', 0)) + "\n"
     prompt += "- Tendance: " + str(technical.get('trend', 'N/A')) + "\n"
     prompt += "- RSI: " + str(technical.get('indicators', {}).get('rsi', 'N/A')) + "\n\n"
     prompt += "NEWS:\n"
     prompt += "- Direction: " + str(news_impact.get('direction', 'N/A')) + "\n"
     prompt += "- Haussieres: " + str(news_impact.get('bullish_count', 0)) + "\n"
     prompt += "- Baissieres: " + str(news_impact.get('bearish_count', 0)) + "\n"
-    prompt += "Titres:\n" + titles_text + "\n\n"
+    prompt += "Titres:\n" + titles_text + "\n"
     prompt += "CALENDRIER:\n"
-    prompt += "- Imminents haut impact: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
+    prompt += "- Imminents: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
     prompt += "- Risque: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
-    prompt += 'Reponds en JSON strict sans markdown:\n'
-    prompt += '{"summary": "resume 2-3 phrases", "sentiment": "bullish/bearish/neutral", "confidence_adjustment": nombre -15 a 15, "key_risks": ["r1", "r2"], "recommendation": "courte reco", "invalidation_scenario": "ce qui invaliderait"}'
+    prompt += 'Reponds en JSON sans markdown:\n'
+    prompt += '{"summary": "resume 2-3 phrases", "sentiment": "bullish ou bearish ou neutral", "confidence_adjustment": nombre entre -15 et 15, "key_risks": ["r1", "r2"], "recommendation": "courte reco", "invalidation_scenario": "ce qui invaliderait"}'
     
     try:
         response = GEMINI_MODEL.generate_content(prompt)
@@ -535,7 +601,7 @@ def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_tit
         GEMINI_CACHE[cache_key] = result
         return result
     except Exception as e:
-        print("Gemini error: " + str(e))
+        print("Gemini error:", e)
         return default
 
 
@@ -550,7 +616,9 @@ def generate_smart_signal(asset):
     if not tech_h1:
         return {"error": "Analyse impossible"}
     
-    h4_confirmed = bool(tech_h4 and tech_h1["signal"] == tech_h4["signal"] and tech_h1["signal"] != "WAIT")
+    h4_confirmed = False
+    if tech_h4 and tech_h1["signal"] == tech_h4["signal"] and tech_h1["signal"] != "WAIT":
+        h4_confirmed = True
     
     all_news = []
     for url in RSS_FEEDS:
@@ -561,7 +629,16 @@ def generate_smart_signal(asset):
     upcoming = get_upcoming_events(24, currencies)
     calendar_impact = analyze_calendar_impact(asset, upcoming)
     
-    news_titles = [n["title"] for n in all_news if any(c in n.get("currencies", []) for c in currencies)][:5]
+    news_titles = []
+    for n in all_news:
+        news_curr = n.get("currencies", [])
+        for c in currencies:
+            if c in news_curr:
+                news_titles.append(n["title"])
+                break
+        if len(news_titles) >= 5:
+            break
+    
     gemini = get_gemini_analysis(asset, tech_h1, news_impact, calendar_impact, news_titles)
     
     tech_score = tech_h1["confidence"]
@@ -586,6 +663,243 @@ def generate_smart_signal(asset):
     
     sent_score = 50
     if news_impact["bullish_count"] > news_impact["bearish_count"]:
-        sent_score = 75 if tech_h1["signal"] == "BUY" else 25
+        if tech_h1["signal"] == "BUY":
+            sent_score = 75
+        else:
+            sent_score = 25
     elif news_impact["bearish_count"] > news_impact["bullish_count"]:
-        sent_score = 75 if te
+        if tech_h1["signal"] == "SELL":
+            sent_score = 75
+        else:
+            sent_score = 25
+    
+    gem_score = 50 + gemini.get("confidence_adjustment", 0) * 3
+    gem_score = max(0, min(100, gem_score))
+    
+    final_conf = int(round(
+        tech_score * 0.30 +
+        news_match * 0.25 +
+        cal_score * 0.20 +
+        sent_score * 0.15 +
+        gem_score * 0.10
+    ))
+    
+    final_signal = tech_h1["signal"]
+    warnings = []
+    
+    if calendar_impact["imminent_high_impact"] > 0:
+        final_signal = "WAIT"
+        warnings.append(str(calendar_impact['imminent_high_impact']) + " evenement(s) imminent(s)")
+    
+    if news_match == 20 and news_impact["high_impact_count"] >= 2:
+        final_conf = max(final_conf - 25, 40)
+        warnings.append("News contradictoires")
+    
+    if final_conf < 60:
+        final_signal = "WAIT"
+    
+    risk_level = "LOW"
+    if calendar_impact["risk_level"] == "HIGH":
+        risk_level = "HIGH"
+    elif calendar_impact["risk_level"] == "MEDIUM" or news_impact["high_impact_count"] >= 2:
+        risk_level = "MEDIUM"
+    
+    return {
+        "asset": asset,
+        "symbol": symbol,
+        "timestamp": datetime.utcnow().isoformat(),
+        "final_signal": final_signal,
+        "final_confidence": final_conf,
+        "risk_level": risk_level,
+        "h4_confirmed": h4_confirmed,
+        "warnings": warnings,
+        "current_price": tech_h1["current_price"],
+        "entry": tech_h1["entry"] if final_signal != "WAIT" else None,
+        "stop_loss": tech_h1["stop_loss"] if final_signal != "WAIT" else None,
+        "take_profit_1": tech_h1["take_profit_1"] if final_signal != "WAIT" else None,
+        "take_profit_2": tech_h1["take_profit_2"] if final_signal != "WAIT" else None,
+        "take_profit_3": tech_h1["take_profit_3"] if final_signal != "WAIT" else None,
+        "risk_reward": tech_h1["risk_reward"] if final_signal != "WAIT" else None,
+        "scores": {
+            "technical": int(tech_score),
+            "news": int(news_match),
+            "calendar": int(cal_score),
+            "sentiment": int(sent_score),
+            "gemini": int(gem_score),
+            "final": final_conf
+        },
+        "technical_analysis": {
+            "trend": tech_h1["trend"],
+            "reasons": tech_h1["reasons"],
+            "indicators": tech_h1["indicators"],
+            "support_resistance": tech_h1["support_resistance"],
+            "h1_signal": tech_h1["signal"],
+            "h4_signal": tech_h4["signal"] if tech_h4 else "N/A"
+        },
+        "news_analysis": {
+            "direction": news_impact["direction"],
+            "count": news_impact["count"],
+            "bullish_count": news_impact["bullish_count"],
+            "bearish_count": news_impact["bearish_count"],
+            "high_impact_count": news_impact["high_impact_count"],
+            "top_titles": news_titles
+        },
+        "calendar_analysis": {
+            "risk_level": calendar_impact["risk_level"],
+            "imminent_high_impact": calendar_impact["imminent_high_impact"],
+            "upcoming_high_impact": calendar_impact["upcoming_high_impact"],
+            "next_events": calendar_impact["next_events"]
+        },
+        "gemini_analysis": gemini
+    }
+
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "message": "TradeVision AI",
+        "version": "5.0.3",
+        "gemini_configured": bool(GEMINI_MODEL)
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "twelve_data_configured": bool(API_KEY),
+        "gemini_configured": bool(GEMINI_MODEL)
+    }
+
+
+@app.get("/api/v1/prices")
+async def get_prices():
+    prices = {}
+    for name, symbol in ASSETS.items():
+        data = td_request("price", {"symbol": symbol})
+        if data and "price" in data:
+            prices[name] = {"price": float(data["price"]), "status": "ok"}
+        else:
+            prices[name] = {"status": "error"}
+    return {"timestamp": datetime.utcnow().isoformat(), "prices": prices}
+
+
+@app.get("/api/v1/signals")
+async def get_signals(min_confidence: int = 70):
+    signals = {}
+    for asset in ASSETS.keys():
+        try:
+            result = generate_smart_signal(asset)
+            if result.get("final_signal") != "WAIT" and result.get("final_confidence", 0) >= min_confidence:
+                signals[asset] = {
+                    "status": "ok",
+                    "signal": result["final_signal"],
+                    "confidence": result["final_confidence"],
+                    "trend": result["technical_analysis"]["trend"],
+                    "current_price": result["current_price"],
+                    "entry": result["entry"],
+                    "stop_loss": result["stop_loss"],
+                    "take_profit_1": result["take_profit_1"],
+                    "take_profit_2": result["take_profit_2"],
+                    "take_profit_3": result["take_profit_3"],
+                    "risk_reward": result["risk_reward"],
+                    "h4_confirmed": result["h4_confirmed"],
+                    "risk_level": result["risk_level"],
+                    "reasons": result["technical_analysis"]["reasons"],
+                    "warnings": result["warnings"],
+                    "scores": result["scores"],
+                    "gemini_summary": result["gemini_analysis"].get("summary", "")
+                }
+            else:
+                signals[asset] = {
+                    "status": "wait",
+                    "signal": "WAIT",
+                    "confidence": result.get("final_confidence", 0),
+                    "reason": "Confiance insuffisante",
+                    "warnings": result.get("warnings", [])
+                }
+        except Exception as e:
+            signals[asset] = {"status": "error", "signal": "WAIT", "error": str(e)}
+    return {"timestamp": datetime.utcnow().isoformat(), "min_confidence": min_confidence, "signals": signals}
+
+
+@app.get("/api/v1/smart-analysis/{asset}")
+async def smart_analysis(asset: str):
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return generate_smart_signal(asset)
+
+
+@app.get("/api/v1/analyze/{asset}")
+async def analyze_endpoint(asset: str, timeframe: str = "1h"):
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+    result = analyze_asset(ASSETS[asset], TIMEFRAMES[timeframe])
+    if result is None:
+        raise HTTPException(status_code=503, detail="Analysis failed")
+    return {"asset": asset, "symbol": ASSETS[asset], "timeframe": timeframe, "timestamp": datetime.utcnow().isoformat(), **result}
+
+
+@app.get("/api/v1/candles/{asset}")
+async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+    data = td_request("time_series", {"symbol": ASSETS[asset], "interval": TIMEFRAMES[timeframe], "outputsize": limit})
+    if not data or "values" not in data:
+        raise HTTPException(status_code=503, detail="No data")
+    values = list(reversed(data["values"]))
+    candles = []
+    for v in values:
+        candles.append({
+            "time": v["datetime"],
+            "open": float(v["open"]),
+            "high": float(v["high"]),
+            "low": float(v["low"]),
+            "close": float(v["close"]),
+            "volume": float(v.get("volume", 0))
+        })
+    return {"asset": asset, "timeframe": timeframe, "count": len(candles), "candles": candles}
+
+
+@app.get("/api/v1/news")
+async def get_news(limit: int = 20, currency: str = None):
+    all_news = []
+    for url in RSS_FEEDS:
+        all_news.extend(fetch_news_from_rss(url, limit=10))
+    if currency:
+        currency = currency.upper()
+        filtered = []
+        for n in all_news:
+            if currency in n["currencies"]:
+                filtered.append(n)
+        all_news = filtered
+    all_news = all_news[:limit]
+    return {"timestamp": datetime.utcnow().isoformat(), "count": len(all_news), "news": all_news}
+
+
+@app.get("/api/v1/calendar")
+async def get_calendar(currency: str = None, impact: str = None):
+    events = fetch_economic_calendar()
+    if currency:
+        currency = currency.upper()
+        filtered = []
+        for e in events:
+            if e["currency"] == currency:
+                filtered.append(e)
+        events = filtered
+    if impact:
+        impact = impact.upper()
+        filtered = []
+        for e in events:
+            if impact in e["impact"].upper():
+                filtered.append(e)
+        events = filtered
+    return {"timestamp": datetime.utcnow().isoformat(), "count": len(events), "events": events}
