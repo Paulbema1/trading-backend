@@ -11,7 +11,7 @@ import json
 import time
 from datetime import datetime, timedelta
 
-app = FastAPI(title="TradeVision AI", version="6.1.0")
+app = FastAPI(title="TradeVision AI", version="6.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -507,7 +507,7 @@ def get_cached_calendar():
         return events
     
     if CALENDAR_CACHE["data"]:
-        print("Utilisation cache calendrier ancien (429)")
+        print("Utilisation cache calendrier ancien")
         return CALENDAR_CACHE["data"]
     
     return []
@@ -674,39 +674,50 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
     for t in news_titles[:5]:
         titles_text += "- " + t[:100] + "\n"
     
-    prompt = "Tu es un analyste Forex professionnel. Reponds UNIQUEMENT en JSON valide sans markdown.\n\n"
-    prompt += "ACTIF: " + display_name + "\n\n"
-    prompt += "TECHNIQUE:\n"
+    prompt = "You are a professional Forex analyst. Respond ONLY with valid JSON, no markdown, no text before or after.\n\n"
+    prompt += "ASSET: " + display_name + "\n\n"
+    prompt += "TECHNICAL:\n"
     prompt += "- Signal: " + str(technical.get('signal', 'N/A')) + "\n"
-    prompt += "- Confiance: " + str(technical.get('confidence', 0)) + "\n"
-    prompt += "- Tendance: " + str(technical.get('trend', 'N/A')) + "\n"
+    prompt += "- Confidence: " + str(technical.get('confidence', 0)) + "\n"
+    prompt += "- Trend: " + str(technical.get('trend', 'N/A')) + "\n"
     prompt += "- RSI: " + str(technical.get('indicators', {}).get('rsi', 'N/A')) + "\n\n"
     prompt += "NEWS:\n"
     prompt += "- Direction: " + str(news_impact.get('direction', 'N/A')) + "\n"
-    prompt += "- Haussieres: " + str(news_impact.get('bullish_count', 0)) + "\n"
-    prompt += "- Baissieres: " + str(news_impact.get('bearish_count', 0)) + "\n"
-    prompt += "Titres:\n" + titles_text + "\n"
-    prompt += "CALENDRIER:\n"
-    prompt += "- Imminents: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
-    prompt += "- Risque: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
-    prompt += 'Reponds STRICTEMENT ainsi:\n'
-    prompt += '{"summary": "resume 2-3 phrases en francais", "sentiment": "bullish ou bearish ou neutral", "confidence_adjustment": nombre entre -15 et 15, "key_risks": ["risque1", "risque2"], "recommendation": "courte recommandation", "invalidation_scenario": "ce qui invaliderait"}'
+    prompt += "- Bullish: " + str(news_impact.get('bullish_count', 0)) + "\n"
+    prompt += "- Bearish: " + str(news_impact.get('bearish_count', 0)) + "\n"
+    prompt += "Titles:\n" + titles_text + "\n"
+    prompt += "CALENDAR:\n"
+    prompt += "- Imminent high impact: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
+    prompt += "- Risk: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
+    prompt += 'Respond STRICTLY with this JSON in French language:\n'
+    prompt += '{"summary":"resume en francais 2-3 phrases","sentiment":"bullish","confidence_adjustment":5,"key_risks":["risque1","risque2"],"recommendation":"courte reco en francais","invalidation_scenario":"ce qui invaliderait en francais"}'
     
     response_text = call_openrouter(prompt)
     
     if not response_text:
         return default
     
+    print("AI raw response:", response_text[:300])
+    
     try:
         text = response_text.strip()
-        text = re.sub(r'^```json\s*', '', text)
-        text = re.sub(r'^```\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
+        
+        text = re.sub(r'```json\s*', '', text)
+        text = re.sub(r'```\s*', '', text)
         text = text.strip()
         
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
-            text = json_match.group(0)
+        start = text.find('{')
+        end = text.rfind('}')
+        
+        if start == -1 or end == -1:
+            print("AI: Pas de JSON dans la reponse")
+            default["summary"] = "Reponse IA sans JSON"
+            return default
+        
+        text = text[start:end+1]
+        
+        text = re.sub(r'[\x00-\x1f\x7f]', ' ', text)
+        text = re.sub(r',(\s*[}\]])', r'\1', text)
         
         analysis = json.loads(text)
         result = {
@@ -722,7 +733,8 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
         AI_CACHE[cache_key] = result
         return result
     except Exception as e:
-        print("AI parse error:", str(e)[:100])
+        print("AI parse error:", str(e)[:200])
+        print("Text tried:", text[:300])
         default["summary"] = "Reponse IA non parseable"
         return default
 
@@ -895,7 +907,7 @@ async def root():
     return {
         "status": "online",
         "message": "TradeVision AI",
-        "version": "6.1.0",
+        "version": "6.2.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
         "active_model": ACTIVE_MODEL or "not_tested_yet"
