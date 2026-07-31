@@ -27,11 +27,13 @@ BASE_URL = "https://api.twelvedata.com"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 OPENROUTER_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "x-ai/grok-4-fast:free",
+    "deepseek/deepseek-chat-v3.1:free",
+    "meta-llama/llama-4-maverick:free",
     "google/gemini-2.0-flash-exp:free",
-    "deepseek/deepseek-chat:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "meta-llama/llama-3.2-3b-instruct:free"
+    "qwen/qwen3-235b-a22b:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free"
 ]
 
 ACTIVE_MODEL = None
