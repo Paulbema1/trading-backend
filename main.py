@@ -11,7 +11,7 @@ import json
 import time
 from datetime import datetime, timedelta
 
-app = FastAPI(title="TradeVision AI", version="6.0.0")
+app = FastAPI(title="TradeVision AI", version="6.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,12 +27,12 @@ BASE_URL = "https://api.twelvedata.com"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 OPENROUTER_MODELS = [
+    "nvidia/nemotron-nano-9b-v2:free",
     "x-ai/grok-4-fast:free",
     "deepseek/deepseek-chat-v3.1:free",
     "meta-llama/llama-4-maverick:free",
     "google/gemini-2.0-flash-exp:free",
     "qwen/qwen3-235b-a22b:free",
-    "nvidia/nemotron-nano-9b-v2:free",
     "mistralai/mistral-small-3.2-24b-instruct:free"
 ]
 
@@ -70,7 +70,6 @@ RSS_FEEDS = [
 ECONOMIC_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 TRACKED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "XAU"]
 
-# CACHES
 NEWS_CACHE = {"data": None, "timestamp": 0}
 CALENDAR_CACHE = {"data": None, "timestamp": 0}
 AI_CACHE = {}
@@ -448,6 +447,7 @@ def fetch_news_from_rss(url, limit=10):
 
 def get_cached_news():
     now = time.time()
+    
     if NEWS_CACHE["data"] and (now - NEWS_CACHE["timestamp"]) < NEWS_CACHE_DURATION:
         return NEWS_CACHE["data"]
     
@@ -458,8 +458,13 @@ def get_cached_news():
     if all_news:
         NEWS_CACHE["data"] = all_news
         NEWS_CACHE["timestamp"] = now
+        return all_news
     
-    return all_news
+    if NEWS_CACHE["data"]:
+        print("Utilisation cache news ancien")
+        return NEWS_CACHE["data"]
+    
+    return []
 
 
 def fetch_economic_calendar():
@@ -490,6 +495,7 @@ def fetch_economic_calendar():
 
 def get_cached_calendar():
     now = time.time()
+    
     if CALENDAR_CACHE["data"] and (now - CALENDAR_CACHE["timestamp"]) < CALENDAR_CACHE_DURATION:
         return CALENDAR_CACHE["data"]
     
@@ -498,8 +504,13 @@ def get_cached_calendar():
     if events:
         CALENDAR_CACHE["data"] = events
         CALENDAR_CACHE["timestamp"] = now
+        return events
     
-    return events
+    if CALENDAR_CACHE["data"]:
+        print("Utilisation cache calendrier ancien (429)")
+        return CALENDAR_CACHE["data"]
+    
+    return []
 
 
 def get_upcoming_events(hours_ahead=24, currencies=None):
@@ -862,7 +873,6 @@ def generate_smart_signal(asset):
         "ai_analysis": ai_analysis
     }
     
-    # Sauvegarde historique si signal valide
     if final_signal != "WAIT" and final_conf >= 70:
         history_item = {
             "timestamp": result["timestamp"],
@@ -885,7 +895,7 @@ async def root():
     return {
         "status": "online",
         "message": "TradeVision AI",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
         "active_model": ACTIVE_MODEL or "not_tested_yet"
