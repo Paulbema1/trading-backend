@@ -8,15 +8,10 @@ import xml.etree.ElementTree as ET
 from html import unescape
 import re
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 
-try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-
-app = FastAPI(title="TradeVision AI", version="5.0.3")
+app = FastAPI(title="TradeVision AI", version="6.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,16 +22,19 @@ app.add_middleware(
 )
 
 API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 BASE_URL = "https://api.twelvedata.com"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-GEMINI_MODEL = None
-if GEMINI_AVAILABLE and GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-         GEMINI_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite')
-    except Exception as e:
-        print("Gemini init error:", e)
+OPENROUTER_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+    "deepseek/deepseek-chat:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free"
+]
+
+ACTIVE_MODEL = None
 
 ASSETS = {
     "EURUSD": "EUR/USD",
@@ -70,7 +68,76 @@ RSS_FEEDS = [
 ECONOMIC_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 TRACKED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "XAU"]
 
-GEMINI_CACHE = {}
+# CACHES
+NEWS_CACHE = {"data": None, "timestamp": 0}
+CALENDAR_CACHE = {"data": None, "timestamp": 0}
+AI_CACHE = {}
+NEWS_CACHE_DURATION = 900
+CALENDAR_CACHE_DURATION = 1800
+AI_CACHE_DURATION = 900
+
+SIGNAL_HISTORY = []
+MAX_HISTORY = 100
+
+
+def call_openrouter(prompt, max_retries=3):
+    global ACTIVE_MODEL
+    
+    if not OPENROUTER_API_KEY:
+        return None
+    
+    headers = {
+        "Authorization": "Bearer " + OPENROUTER_API_KEY,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://tradevision-ai.app",
+        "X-Title": "TradeVision AI"
+    }
+    
+    models_to_try = [ACTIVE_MODEL] if ACTIVE_MODEL else OPENROUTER_MODELS
+    
+    for model in models_to_try:
+        if not model:
+            continue
+        
+        for attempt in range(max_retries):
+            try:
+                payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 800
+                }
+                
+                response = requests.post(
+                    OPENROUTER_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                )
+                
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt
+                    print("Rate limit, waiting " + str(wait_time) + "s")
+                    time.sleep(wait_time)
+                    continue
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0]["message"]["content"]
+                        if ACTIVE_MODEL != model:
+                            ACTIVE_MODEL = model
+                            print("Active model: " + model)
+                        return content
+                else:
+                    print("OpenRouter error " + str(response.status_code) + " for " + model)
+                    break
+                    
+            except Exception as e:
+                print("OpenRouter exception: " + str(e)[:100])
+                break
+    
+    return None
 
 
 def td_request(endpoint, params):
@@ -377,6 +444,22 @@ def fetch_news_from_rss(url, limit=10):
         return []
 
 
+def get_cached_news():
+    now = time.time()
+    if NEWS_CACHE["data"] and (now - NEWS_CACHE["timestamp"]) < NEWS_CACHE_DURATION:
+        return NEWS_CACHE["data"]
+    
+    all_news = []
+    for url in RSS_FEEDS:
+        all_news.extend(fetch_news_from_rss(url, limit=10))
+    
+    if all_news:
+        NEWS_CACHE["data"] = all_news
+        NEWS_CACHE["timestamp"] = now
+    
+    return all_news
+
+
 def fetch_economic_calendar():
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -403,8 +486,22 @@ def fetch_economic_calendar():
         return []
 
 
-def get_upcoming_events(hours_ahead=24, currencies=None):
+def get_cached_calendar():
+    now = time.time()
+    if CALENDAR_CACHE["data"] and (now - CALENDAR_CACHE["timestamp"]) < CALENDAR_CACHE_DURATION:
+        return CALENDAR_CACHE["data"]
+    
     events = fetch_economic_calendar()
+    
+    if events:
+        CALENDAR_CACHE["data"] = events
+        CALENDAR_CACHE["timestamp"] = now
+    
+    return events
+
+
+def get_upcoming_events(hours_ahead=24, currencies=None):
+    events = get_cached_calendar()
     now = datetime.utcnow()
     upcoming = []
     for e in events:
@@ -537,25 +634,26 @@ def analyze_calendar_impact(asset, upcoming_events):
     }
 
 
-def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_titles):
+def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles):
     default = {
         "available": False,
-        "summary": "Gemini non disponible",
+        "summary": "IA non disponible",
         "sentiment": "neutral",
         "confidence_adjustment": 0,
         "key_risks": [],
         "recommendation": "",
-        "invalidation_scenario": ""
+        "invalidation_scenario": "",
+        "model_used": "none"
     }
     
-    if not GEMINI_MODEL:
+    if not OPENROUTER_API_KEY:
         return default
     
-    ts_bucket = int(datetime.utcnow().timestamp() // 900)
+    ts_bucket = int(datetime.utcnow().timestamp() // AI_CACHE_DURATION)
     cache_key = asset + "_" + str(technical.get('signal')) + "_" + str(ts_bucket)
     
-    if cache_key in GEMINI_CACHE:
-        return GEMINI_CACHE[cache_key]
+    if cache_key in AI_CACHE:
+        return AI_CACHE[cache_key]
     
     display_name = ASSETS.get(asset, asset)
     
@@ -563,7 +661,7 @@ def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_tit
     for t in news_titles[:5]:
         titles_text += "- " + t[:100] + "\n"
     
-    prompt = "Tu es un analyste Forex professionnel.\n\n"
+    prompt = "Tu es un analyste Forex professionnel. Reponds UNIQUEMENT en JSON valide sans markdown.\n\n"
     prompt += "ACTIF: " + display_name + "\n\n"
     prompt += "TECHNIQUE:\n"
     prompt += "- Signal: " + str(technical.get('signal', 'N/A')) + "\n"
@@ -578,15 +676,24 @@ def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_tit
     prompt += "CALENDRIER:\n"
     prompt += "- Imminents: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
     prompt += "- Risque: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
-    prompt += 'Reponds en JSON sans markdown:\n'
-    prompt += '{"summary": "resume 2-3 phrases", "sentiment": "bullish ou bearish ou neutral", "confidence_adjustment": nombre entre -15 et 15, "key_risks": ["r1", "r2"], "recommendation": "courte reco", "invalidation_scenario": "ce qui invaliderait"}'
+    prompt += 'Reponds STRICTEMENT ainsi:\n'
+    prompt += '{"summary": "resume 2-3 phrases en francais", "sentiment": "bullish ou bearish ou neutral", "confidence_adjustment": nombre entre -15 et 15, "key_risks": ["risque1", "risque2"], "recommendation": "courte recommandation", "invalidation_scenario": "ce qui invaliderait"}'
+    
+    response_text = call_openrouter(prompt)
+    
+    if not response_text:
+        return default
     
     try:
-        response = GEMINI_MODEL.generate_content(prompt)
-        text = response.text.strip()
+        text = response_text.strip()
         text = re.sub(r'^```json\s*', '', text)
+        text = re.sub(r'^```\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
         text = text.strip()
+        
+        json_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(0)
         
         analysis = json.loads(text)
         result = {
@@ -596,12 +703,14 @@ def get_gemini_analysis(asset, technical, news_impact, calendar_impact, news_tit
             "confidence_adjustment": int(analysis.get("confidence_adjustment", 0)),
             "key_risks": analysis.get("key_risks", []),
             "recommendation": analysis.get("recommendation", ""),
-            "invalidation_scenario": analysis.get("invalidation_scenario", "")
+            "invalidation_scenario": analysis.get("invalidation_scenario", ""),
+            "model_used": ACTIVE_MODEL or "unknown"
         }
-        GEMINI_CACHE[cache_key] = result
+        AI_CACHE[cache_key] = result
         return result
     except Exception as e:
-        print("Gemini error:", e)
+        print("AI parse error:", str(e)[:100])
+        default["summary"] = "Reponse IA non parseable"
         return default
 
 
@@ -620,9 +729,7 @@ def generate_smart_signal(asset):
     if tech_h4 and tech_h1["signal"] == tech_h4["signal"] and tech_h1["signal"] != "WAIT":
         h4_confirmed = True
     
-    all_news = []
-    for url in RSS_FEEDS:
-        all_news.extend(fetch_news_from_rss(url, limit=10))
+    all_news = get_cached_news()
     
     news_impact = analyze_news_impact(asset, all_news)
     currencies = ASSET_CURRENCIES.get(asset, [])
@@ -639,7 +746,7 @@ def generate_smart_signal(asset):
         if len(news_titles) >= 5:
             break
     
-    gemini = get_gemini_analysis(asset, tech_h1, news_impact, calendar_impact, news_titles)
+    ai_analysis = get_ai_analysis(asset, tech_h1, news_impact, calendar_impact, news_titles)
     
     tech_score = tech_h1["confidence"]
     if h4_confirmed:
@@ -673,15 +780,15 @@ def generate_smart_signal(asset):
         else:
             sent_score = 25
     
-    gem_score = 50 + gemini.get("confidence_adjustment", 0) * 3
-    gem_score = max(0, min(100, gem_score))
+    ai_score = 50 + ai_analysis.get("confidence_adjustment", 0) * 3
+    ai_score = max(0, min(100, ai_score))
     
     final_conf = int(round(
         tech_score * 0.30 +
         news_match * 0.25 +
         cal_score * 0.20 +
         sent_score * 0.15 +
-        gem_score * 0.10
+        ai_score * 0.10
     ))
     
     final_signal = tech_h1["signal"]
@@ -704,7 +811,7 @@ def generate_smart_signal(asset):
     elif calendar_impact["risk_level"] == "MEDIUM" or news_impact["high_impact_count"] >= 2:
         risk_level = "MEDIUM"
     
-    return {
+    result = {
         "asset": asset,
         "symbol": symbol,
         "timestamp": datetime.utcnow().isoformat(),
@@ -725,7 +832,7 @@ def generate_smart_signal(asset):
             "news": int(news_match),
             "calendar": int(cal_score),
             "sentiment": int(sent_score),
-            "gemini": int(gem_score),
+            "ai": int(ai_score),
             "final": final_conf
         },
         "technical_analysis": {
@@ -750,8 +857,25 @@ def generate_smart_signal(asset):
             "upcoming_high_impact": calendar_impact["upcoming_high_impact"],
             "next_events": calendar_impact["next_events"]
         },
-        "gemini_analysis": gemini
+        "ai_analysis": ai_analysis
     }
+    
+    # Sauvegarde historique si signal valide
+    if final_signal != "WAIT" and final_conf >= 70:
+        history_item = {
+            "timestamp": result["timestamp"],
+            "asset": asset,
+            "signal": final_signal,
+            "confidence": final_conf,
+            "entry": result["entry"],
+            "stop_loss": result["stop_loss"],
+            "take_profit_1": result["take_profit_1"]
+        }
+        SIGNAL_HISTORY.insert(0, history_item)
+        if len(SIGNAL_HISTORY) > MAX_HISTORY:
+            SIGNAL_HISTORY.pop()
+    
+    return result
 
 
 @app.get("/")
@@ -759,8 +883,10 @@ async def root():
     return {
         "status": "online",
         "message": "TradeVision AI",
-        "version": "5.0.3",
-        "gemini_configured": bool(GEMINI_MODEL)
+        "version": "6.0.0",
+        "ai_provider": "OpenRouter",
+        "ai_configured": bool(OPENROUTER_API_KEY),
+        "active_model": ACTIVE_MODEL or "not_tested_yet"
     }
 
 
@@ -769,7 +895,11 @@ async def health():
     return {
         "status": "healthy",
         "twelve_data_configured": bool(API_KEY),
-        "gemini_configured": bool(GEMINI_MODEL)
+        "openrouter_configured": bool(OPENROUTER_API_KEY),
+        "active_model": ACTIVE_MODEL or "not_tested_yet",
+        "news_cached": bool(NEWS_CACHE["data"]),
+        "calendar_cached": bool(CALENDAR_CACHE["data"]),
+        "signals_in_history": len(SIGNAL_HISTORY)
     }
 
 
@@ -809,7 +939,7 @@ async def get_signals(min_confidence: int = 70):
                     "reasons": result["technical_analysis"]["reasons"],
                     "warnings": result["warnings"],
                     "scores": result["scores"],
-                    "gemini_summary": result["gemini_analysis"].get("summary", "")
+                    "ai_summary": result["ai_analysis"].get("summary", "")
                 }
             else:
                 signals[asset] = {
@@ -871,9 +1001,7 @@ async def get_candles(asset: str, timeframe: str = "1h", limit: int = 100):
 
 @app.get("/api/v1/news")
 async def get_news(limit: int = 20, currency: str = None):
-    all_news = []
-    for url in RSS_FEEDS:
-        all_news.extend(fetch_news_from_rss(url, limit=10))
+    all_news = get_cached_news()
     if currency:
         currency = currency.upper()
         filtered = []
@@ -882,12 +1010,12 @@ async def get_news(limit: int = 20, currency: str = None):
                 filtered.append(n)
         all_news = filtered
     all_news = all_news[:limit]
-    return {"timestamp": datetime.utcnow().isoformat(), "count": len(all_news), "news": all_news}
+    return {"timestamp": datetime.utcnow().isoformat(), "count": len(all_news), "news": all_news, "cached": True}
 
 
 @app.get("/api/v1/calendar")
 async def get_calendar(currency: str = None, impact: str = None):
-    events = fetch_economic_calendar()
+    events = get_cached_calendar()
     if currency:
         currency = currency.upper()
         filtered = []
@@ -902,4 +1030,21 @@ async def get_calendar(currency: str = None, impact: str = None):
             if impact in e["impact"].upper():
                 filtered.append(e)
         events = filtered
-    return {"timestamp": datetime.utcnow().isoformat(), "count": len(events), "events": events}
+    return {"timestamp": datetime.utcnow().isoformat(), "count": len(events), "events": events, "cached": True}
+
+
+@app.get("/api/v1/history")
+async def get_history(limit: int = 50):
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "count": len(SIGNAL_HISTORY),
+        "signals": SIGNAL_HISTORY[:limit]
+    }
+
+
+@app.delete("/api/v1/history")
+async def clear_history():
+    global SIGNAL_HISTORY
+    count = len(SIGNAL_HISTORY)
+    SIGNAL_HISTORY = []
+    return {"cleared": count, "message": "Historique efface"}
