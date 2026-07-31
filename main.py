@@ -34,7 +34,7 @@ GEMINI_MODEL = None
 if GEMINI_AVAILABLE and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-                GEMINI_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite')
+         GEMINI_MODEL = genai.GenerativeModel('gemini-2.5-flash-lite')
     except Exception as e:
         print("Gemini init error:", e)
 
