@@ -77,7 +77,7 @@ NEWS_CACHE_DURATION = 900
 CALENDAR_CACHE_DURATION = 1800
 AI_CACHE_DURATION = 900
 
- SIGNAL_HISTORY = []
+SIGNAL_HISTORY = []
 MAX_HISTORY = 100
 
 # Auto-ping pour éviter la veille Render (toutes les 5 minutes)
