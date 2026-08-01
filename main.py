@@ -9,9 +9,10 @@ from html import unescape
 import re
 import json
 import time
+import threading
 from datetime import datetime, timedelta
 
-app = FastAPI(title="TradeVision AI", version="6.2.0")
+app = FastAPI(title="TradeVision AI", version="6.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,25 +81,20 @@ AI_CACHE_DURATION = 900
 SIGNAL_HISTORY = []
 MAX_HISTORY = 100
 
-# Auto-ping pour éviter la veille Render (toutes les 5 minutes)
-import threading
 
 def keep_alive():
-    """Auto-ping toutes les 5 minutes pour empêcher Render de dormir"""
     while True:
-        time.sleep(300)  # 5 minutes = 300 secondes
+        time.sleep(300)
         try:
             requests.get("https://trading-backend-23od.onrender.com/health", timeout=10)
             print("Auto-ping OK")
         except Exception as e:
             print(f"Auto-ping error: {e}")
 
+
 keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
 keep_alive_thread.start()
-print("Auto-ping thread demarre (interval 5 min)")
-
-
-def call_openrouter(prompt, max_retries=3):
+print("Auto-ping thread demarre (5 min interval)")
 
 
 def call_openrouter(prompt, max_retries=3):
@@ -754,7 +750,6 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
         return result
     except Exception as e:
         print("AI parse error:", str(e)[:200])
-        print("Text tried:", text[:300])
         default["summary"] = "Reponse IA non parseable"
         return default
 
@@ -927,10 +922,11 @@ async def root():
     return {
         "status": "online",
         "message": "TradeVision AI",
-        "version": "6.2.0",
+        "version": "6.3.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
-        "active_model": ACTIVE_MODEL or "not_tested_yet"
+        "active_model": ACTIVE_MODEL or "not_tested_yet",
+        "auto_ping": "enabled (5 min)"
     }
 
 
