@@ -77,8 +77,28 @@ NEWS_CACHE_DURATION = 900
 CALENDAR_CACHE_DURATION = 1800
 AI_CACHE_DURATION = 900
 
-SIGNAL_HISTORY = []
+ SIGNAL_HISTORY = []
 MAX_HISTORY = 100
+
+# Auto-ping pour éviter la veille Render (toutes les 5 minutes)
+import threading
+
+def keep_alive():
+    """Auto-ping toutes les 5 minutes pour empêcher Render de dormir"""
+    while True:
+        time.sleep(300)  # 5 minutes = 300 secondes
+        try:
+            requests.get("https://trading-backend-23od.onrender.com/health", timeout=10)
+            print("Auto-ping OK")
+        except Exception as e:
+            print(f"Auto-ping error: {e}")
+
+keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+keep_alive_thread.start()
+print("Auto-ping thread demarre (interval 5 min)")
+
+
+def call_openrouter(prompt, max_retries=3):
 
 
 def call_openrouter(prompt, max_retries=3):
