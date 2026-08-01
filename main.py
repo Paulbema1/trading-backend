@@ -12,7 +12,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 
-app = FastAPI(title="TradeVision AI", version="6.3.0")
+app = FastAPI(title="TradeVision AI", version="7.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,7 +60,25 @@ ASSET_BASE_QUOTE = {
     "XAUUSD": ("XAU", "USD")
 }
 
-TIMEFRAMES = {"1h": "1h", "4h": "4h", "1d": "1day"}
+# Timeframes supportes
+TIMEFRAMES = {
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "1h",
+    "2h": "2h",
+    "4h": "4h",
+    "1d": "1day"
+}
+
+# Regle x4 pour timeframe de confirmation automatique
+CONFIRMATION_MAP = {
+    "15m": "1h",
+    "30m": "2h",
+    "1h": "4h",
+    "2h": "1d",
+    "4h": "1d",
+    "1d": "1d"
+}
 
 RSS_FEEDS = [
     "https://www.investing.com/rss/news_1.rss",
@@ -226,6 +244,570 @@ def find_support_resistance(df, window=10):
     supports = df["low"][df["low"] == lows].dropna().tail(3).tolist()
     return supports, resistances
 
+# ═══════════════════════════════════════════════════════
+#           SMART MONEY CONCEPTS (SMC)
+# ═══════════════════════════════════════════════════════
+
+
+def find_swing_points(df, lookback=5):
+    """Detecte les swing highs et swing lows"""
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(lookback, len(df) - lookback):
+        high = df["high"].iloc[i]
+        low = df["low"].iloc[i]
+        
+        # Swing High : plus haut que les 'lookback' bougies avant et apres
+        is_swing_high = True
+        for j in range(1, lookback + 1):
+            if high <= df["high"].iloc[i - j] or high <= df["high"].iloc[i + j]:
+                is_swing_high = False
+                break
+        
+        if is_swing_high:
+            swing_highs.append({
+                "index": i,
+                "datetime": df.index[i],
+                "price": float(high)
+            })
+        
+        # Swing Low : plus bas que les 'lookback' bougies avant et apres
+        is_swing_low = True
+        for j in range(1, lookback + 1):
+            if low >= df["low"].iloc[i - j] or low >= df["low"].iloc[i + j]:
+                is_swing_low = False
+                break
+        
+        if is_swing_low:
+            swing_lows.append({
+                "index": i,
+                "datetime": df.index[i],
+                "price": float(low)
+            })
+    
+    return swing_highs, swing_lows
+
+
+def analyze_market_structure(df):
+    """Analyse la structure du marche (HH, HL, LH, LL)"""
+    swing_highs, swing_lows = find_swing_points(df, lookback=5)
+    
+    structure = {
+        "trend": "neutral",
+        "recent_highs": [],
+        "recent_lows": [],
+        "structure_type": "unknown"
+    }
+    
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return structure
+    
+    # Derniers swings
+    last_highs = swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs
+    last_lows = swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows
+    
+    structure["recent_highs"] = [{"price": h["price"], "index": h["index"]} for h in last_highs]
+    structure["recent_lows"] = [{"price": l["price"], "index": l["index"]} for l in last_lows]
+    
+    # Analyse tendance
+    higher_highs = 0
+    lower_highs = 0
+    higher_lows = 0
+    lower_lows = 0
+    
+    for i in range(1, len(last_highs)):
+        if last_highs[i]["price"] > last_highs[i-1]["price"]:
+            higher_highs += 1
+        else:
+            lower_highs += 1
+    
+    for i in range(1, len(last_lows)):
+        if last_lows[i]["price"] > last_lows[i-1]["price"]:
+            higher_lows += 1
+        else:
+            lower_lows += 1
+    
+    # Determiner la structure
+    if higher_highs >= 1 and higher_lows >= 1:
+        structure["trend"] = "bullish"
+        structure["structure_type"] = "HH_HL"
+    elif lower_highs >= 1 and lower_lows >= 1:
+        structure["trend"] = "bearish"
+        structure["structure_type"] = "LH_LL"
+    else:
+        structure["trend"] = "ranging"
+        structure["structure_type"] = "consolidation"
+    
+    return structure
+
+
+def detect_bos(df, structure):
+    """Detecte les Break of Structure (BOS)"""
+    swing_highs, swing_lows = find_swing_points(df, lookback=5)
+    
+    bos = {
+        "detected": False,
+        "type": None,
+        "level": None,
+        "index": None
+    }
+    
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return bos
+    
+    current_price = float(df["close"].iloc[-1])
+    last_close = float(df["close"].iloc[-2])
+    
+    # BOS Haussier : cassure du dernier swing high
+    if len(swing_highs) >= 2:
+        last_swing_high = swing_highs[-2]["price"]
+        recent_high_after = max([df["high"].iloc[i] for i in range(swing_highs[-2]["index"] + 1, len(df))])
+        
+        if recent_high_after > last_swing_high and current_price > last_swing_high:
+            bos = {
+                "detected": True,
+                "type": "bullish",
+                "level": round(last_swing_high, 5),
+                "index": swing_highs[-2]["index"]
+            }
+    
+    # BOS Baissier : cassure du dernier swing low
+    if len(swing_lows) >= 2:
+        last_swing_low = swing_lows[-2]["price"]
+        recent_low_after = min([df["low"].iloc[i] for i in range(swing_lows[-2]["index"] + 1, len(df))])
+        
+        if recent_low_after < last_swing_low and current_price < last_swing_low:
+            if not bos["detected"] or bos["type"] == "bearish":
+                bos = {
+                    "detected": True,
+                    "type": "bearish",
+                    "level": round(last_swing_low, 5),
+                    "index": swing_lows[-2]["index"]
+                }
+    
+    return bos
+
+
+def detect_choch(df, structure):
+    """Detecte les Change of Character (CHOCH)"""
+    swing_highs, swing_lows = find_swing_points(df, lookback=5)
+    
+    choch = {
+        "detected": False,
+        "type": None,
+        "level": None,
+        "reason": ""
+    }
+    
+    if len(swing_highs) < 3 or len(swing_lows) < 3:
+        return choch
+    
+    current_price = float(df["close"].iloc[-1])
+    
+    # CHOCH Haussier : dans tendance baissiere, cassure d'un swing high recent
+    if structure["trend"] == "bearish":
+        recent_high = swing_highs[-1]["price"]
+        if current_price > recent_high:
+            choch = {
+                "detected": True,
+                "type": "bullish",
+                "level": round(recent_high, 5),
+                "reason": "Cassure haussiere apres tendance baissiere"
+            }
+    
+    # CHOCH Baissier : dans tendance haussiere, cassure d'un swing low recent
+    elif structure["trend"] == "bullish":
+        recent_low = swing_lows[-1]["price"]
+        if current_price < recent_low:
+            choch = {
+                "detected": True,
+                "type": "bearish",
+                "level": round(recent_low, 5),
+                "reason": "Cassure baissiere apres tendance haussiere"
+            }
+    
+    return choch
+
+
+def detect_order_blocks(df, lookback=20):
+    """Detecte les Order Blocks (OB)"""
+    order_blocks = {
+        "bullish": [],
+        "bearish": []
+    }
+    
+    if len(df) < lookback + 5:
+        return order_blocks
+    
+    # Parcourir les dernieres bougies
+    for i in range(len(df) - lookback, len(df) - 2):
+        candle = df.iloc[i]
+        next_candles = df.iloc[i+1:i+5]
+        
+        candle_body = abs(candle["close"] - candle["open"])
+        candle_range = candle["high"] - candle["low"]
+        
+        if candle_range == 0:
+            continue
+        
+        # OB Bullish : bougie baissiere suivie d'un fort mouvement haussier
+        if candle["close"] < candle["open"]:  # Bougie baissiere
+            move_up = (next_candles["high"].max() - candle["low"]) / candle["low"] * 100
+            
+            if move_up > 0.3:  # Mouvement de plus de 0.3%
+                order_blocks["bullish"].append({
+                    "type": "bullish",
+                    "high": round(float(candle["high"]), 5),
+                    "low": round(float(candle["low"]), 5),
+                    "index": i,
+                    "strength": round(move_up, 2)
+                })
+        
+        # OB Bearish : bougie haussiere suivie d'un fort mouvement baissier
+        if candle["close"] > candle["open"]:  # Bougie haussiere
+            move_down = (candle["high"] - next_candles["low"].min()) / candle["high"] * 100
+            
+            if move_down > 0.3:  # Mouvement de plus de 0.3%
+                order_blocks["bearish"].append({
+                    "type": "bearish",
+                    "high": round(float(candle["high"]), 5),
+                    "low": round(float(candle["low"]), 5),
+                    "index": i,
+                    "strength": round(move_down, 2)
+                })
+    
+    # Garder les 3 derniers OB de chaque type
+    order_blocks["bullish"] = sorted(order_blocks["bullish"], key=lambda x: x["strength"], reverse=True)[:3]
+    order_blocks["bearish"] = sorted(order_blocks["bearish"], key=lambda x: x["strength"], reverse=True)[:3]
+    
+    return order_blocks
+
+
+def detect_fvg(df, lookback=30):
+    """Detecte les Fair Value Gaps (FVG)"""
+    fvg_list = {
+        "bullish": [],
+        "bearish": []
+    }
+    
+    if len(df) < 3:
+        return fvg_list
+    
+    start = max(0, len(df) - lookback)
+    
+    for i in range(start + 1, len(df) - 1):
+        prev_candle = df.iloc[i - 1]
+        curr_candle = df.iloc[i]
+        next_candle = df.iloc[i + 1]
+        
+        # FVG Bullish : gap entre high de la bougie precedente et low de la suivante
+        if next_candle["low"] > prev_candle["high"]:
+            gap_size = next_candle["low"] - prev_candle["high"]
+            fvg_list["bullish"].append({
+                "type": "bullish",
+                "top": round(float(next_candle["low"]), 5),
+                "bottom": round(float(prev_candle["high"]), 5),
+                "index": i,
+                "size": round(float(gap_size), 5)
+            })
+        
+        # FVG Bearish : gap entre low de la bougie precedente et high de la suivante
+        if next_candle["high"] < prev_candle["low"]:
+            gap_size = prev_candle["low"] - next_candle["high"]
+            fvg_list["bearish"].append({
+                "type": "bearish",
+                "top": round(float(prev_candle["low"]), 5),
+                "bottom": round(float(next_candle["high"]), 5),
+                "index": i,
+                "size": round(float(gap_size), 5)
+            })
+    
+    # Garder les 3 derniers de chaque
+    fvg_list["bullish"] = fvg_list["bullish"][-3:]
+    fvg_list["bearish"] = fvg_list["bearish"][-3:]
+    
+    return fvg_list
+
+
+def detect_liquidity_zones(df, lookback=50):
+    """Detecte les zones de liquidite (Equal Highs / Equal Lows)"""
+    liquidity = {
+        "equal_highs": [],
+        "equal_lows": [],
+        "buy_side_liquidity": [],
+        "sell_side_liquidity": []
+    }
+    
+    if len(df) < 10:
+        return liquidity
+    
+    start = max(0, len(df) - lookback)
+    tolerance = df["close"].mean() * 0.0005  # 0.05% de tolerance
+    
+    highs = []
+    lows = []
+    
+    for i in range(start, len(df)):
+        highs.append((i, float(df["high"].iloc[i])))
+        lows.append((i, float(df["low"].iloc[i])))
+    
+    # Detecter Equal Highs
+    for i in range(len(highs)):
+        for j in range(i + 1, len(highs)):
+            if abs(highs[i][1] - highs[j][1]) <= tolerance:
+                liquidity["equal_highs"].append({
+                    "price": round(highs[i][1], 5),
+                    "indices": [highs[i][0], highs[j][0]]
+                })
+    
+    # Detecter Equal Lows
+    for i in range(len(lows)):
+        for j in range(i + 1, len(lows)):
+            if abs(lows[i][1] - lows[j][1]) <= tolerance:
+                liquidity["equal_lows"].append({
+                    "price": round(lows[i][1], 5),
+                    "indices": [lows[i][0], lows[j][0]]
+                })
+    
+    # Buy Side Liquidity (au-dessus des Equal Highs)
+    if liquidity["equal_highs"]:
+        recent_eh = sorted(liquidity["equal_highs"], key=lambda x: x["price"], reverse=True)[:3]
+        liquidity["buy_side_liquidity"] = [x["price"] for x in recent_eh]
+    
+    # Sell Side Liquidity (en-dessous des Equal Lows)
+    if liquidity["equal_lows"]:
+        recent_el = sorted(liquidity["equal_lows"], key=lambda x: x["price"])[:3]
+        liquidity["sell_side_liquidity"] = [x["price"] for x in recent_el]
+    
+    # Limiter les listes
+    liquidity["equal_highs"] = liquidity["equal_highs"][:5]
+    liquidity["equal_lows"] = liquidity["equal_lows"][:5]
+    
+    return liquidity
+
+
+def detect_liquidity_sweep(df, liquidity):
+    """Detecte les Liquidity Sweeps (balayages de liquidite)"""
+    sweep = {
+        "detected": False,
+        "type": None,
+        "level": None,
+        "reason": ""
+    }
+    
+    if len(df) < 5:
+        return sweep
+    
+    recent_candles = df.tail(5)
+    current_close = float(df["close"].iloc[-1])
+    
+    # Sweep haussier : le prix a depasse un Buy Side Liquidity puis reverse baissier
+    for bsl_price in liquidity.get("buy_side_liquidity", []):
+        if recent_candles["high"].max() > bsl_price and current_close < bsl_price:
+            sweep = {
+                "detected": True,
+                "type": "bearish",
+                "level": bsl_price,
+                "reason": "Balayage de liquidite haussiere puis retour"
+            }
+            break
+    
+    # Sweep baissier : le prix a depasse un Sell Side Liquidity puis reverse haussier
+    for ssl_price in liquidity.get("sell_side_liquidity", []):
+        if recent_candles["low"].min() < ssl_price and current_close > ssl_price:
+            sweep = {
+                "detected": True,
+                "type": "bullish",
+                "level": ssl_price,
+                "reason": "Balayage de liquidite baissiere puis retour"
+            }
+            break
+    
+    return sweep
+
+
+def detect_premium_discount(df, lookback=50):
+    """Detecte la zone Premium/Discount (basee sur le range)"""
+    if len(df) < lookback:
+        lookback = len(df)
+    
+    recent = df.tail(lookback)
+    high = float(recent["high"].max())
+    low = float(recent["low"].min())
+    current = float(df["close"].iloc[-1])
+    
+    mid = (high + low) / 2
+    
+    zone = "equilibrium"
+    if current > mid:
+        percent = ((current - mid) / (high - mid)) * 100 if high != mid else 0
+        if percent > 30:
+            zone = "premium"
+    else:
+        percent = ((mid - current) / (mid - low)) * 100 if low != mid else 0
+        if percent > 30:
+            zone = "discount"
+    
+    return {
+        "zone": zone,
+        "range_high": round(high, 5),
+        "range_low": round(low, 5),
+        "range_mid": round(mid, 5),
+        "current_price": round(current, 5)
+    }
+
+
+def detect_breaker_blocks(df, order_blocks):
+    """Detecte les Breaker Blocks (Order Blocks casses puis retestes)"""
+    breakers = {
+        "bullish": [],
+        "bearish": []
+    }
+    
+    if len(df) < 10:
+        return breakers
+    
+    current_price = float(df["close"].iloc[-1])
+    
+    # Breaker Bullish : ancien OB bearish casse a la hausse et devient support
+    for ob in order_blocks.get("bearish", []):
+        after_break = df.iloc[ob["index"]+1:]
+        if len(after_break) > 0 and after_break["high"].max() > ob["high"]:
+            if current_price > ob["low"]:
+                breakers["bullish"].append({
+                    "type": "bullish_breaker",
+                    "high": ob["high"],
+                    "low": ob["low"],
+                    "index": ob["index"]
+                })
+    
+    # Breaker Bearish : ancien OB bullish casse a la baisse et devient resistance
+    for ob in order_blocks.get("bullish", []):
+        after_break = df.iloc[ob["index"]+1:]
+        if len(after_break) > 0 and after_break["low"].min() < ob["low"]:
+            if current_price < ob["high"]:
+                breakers["bearish"].append({
+                    "type": "bearish_breaker",
+                    "high": ob["high"],
+                    "low": ob["low"],
+                    "index": ob["index"]
+                })
+    
+    breakers["bullish"] = breakers["bullish"][:3]
+    breakers["bearish"] = breakers["bearish"][:3]
+    
+    return breakers
+
+
+def analyze_smc(df):
+    """Analyse SMC complete - retourne toutes les detections"""
+    if df is None or len(df) < 30:
+        return None
+    
+    structure = analyze_market_structure(df)
+    bos = detect_bos(df, structure)
+    choch = detect_choch(df, structure)
+    order_blocks = detect_order_blocks(df)
+    breaker_blocks = detect_breaker_blocks(df, order_blocks)
+    fvg = detect_fvg(df)
+    liquidity = detect_liquidity_zones(df)
+    sweep = detect_liquidity_sweep(df, liquidity)
+    premium_discount = detect_premium_discount(df)
+    
+    # Score SMC
+    smc_score = 0
+    smc_signals = []
+    smc_direction = "neutral"
+    
+    # Market Structure
+    if structure["trend"] == "bullish":
+        smc_score += 20
+        smc_signals.append("Structure haussiere (HH/HL)")
+    elif structure["trend"] == "bearish":
+        smc_score -= 20
+        smc_signals.append("Structure baissiere (LH/LL)")
+    
+    # BOS
+    if bos["detected"]:
+        if bos["type"] == "bullish":
+            smc_score += 25
+            smc_signals.append("BOS haussier a " + str(bos["level"]))
+        else:
+            smc_score -= 25
+            smc_signals.append("BOS baissier a " + str(bos["level"]))
+    
+    # CHOCH (signal fort)
+    if choch["detected"]:
+        if choch["type"] == "bullish":
+            smc_score += 30
+            smc_signals.append("CHOCH haussier a " + str(choch["level"]))
+        else:
+            smc_score -= 30
+            smc_signals.append("CHOCH baissier a " + str(choch["level"]))
+    
+    # Order Blocks
+    if order_blocks["bullish"]:
+        smc_score += 15
+        smc_signals.append(str(len(order_blocks["bullish"])) + " Order Block(s) haussier(s)")
+    if order_blocks["bearish"]:
+        smc_score -= 15
+        smc_signals.append(str(len(order_blocks["bearish"])) + " Order Block(s) baissier(s)")
+    
+    # Breaker Blocks
+    if breaker_blocks["bullish"]:
+        smc_score += 10
+        smc_signals.append("Breaker Block haussier")
+    if breaker_blocks["bearish"]:
+        smc_score -= 10
+        smc_signals.append("Breaker Block baissier")
+    
+    # FVG
+    if fvg["bullish"]:
+        smc_score += 10
+        smc_signals.append(str(len(fvg["bullish"])) + " FVG haussier(s)")
+    if fvg["bearish"]:
+        smc_score -= 10
+        smc_signals.append(str(len(fvg["bearish"])) + " FVG baissier(s)")
+    
+    # Liquidity Sweep (signal fort)
+    if sweep["detected"]:
+        if sweep["type"] == "bullish":
+            smc_score += 20
+            smc_signals.append("Liquidity Sweep haussier")
+        else:
+            smc_score -= 20
+            smc_signals.append("Liquidity Sweep baissier")
+    
+    # Premium/Discount
+    if premium_discount["zone"] == "discount":
+        smc_score += 10
+        smc_signals.append("Prix en zone Discount (achat favorable)")
+    elif premium_discount["zone"] == "premium":
+        smc_score -= 10
+        smc_signals.append("Prix en zone Premium (vente favorable)")
+    
+    # Direction finale
+    if smc_score >= 30:
+        smc_direction = "bullish"
+    elif smc_score <= -30:
+        smc_direction = "bearish"
+    
+    return {
+        "smc_score": smc_score,
+        "smc_direction": smc_direction,
+        "smc_signals": smc_signals,
+        "market_structure": structure,
+        "bos": bos,
+        "choch": choch,
+        "order_blocks": order_blocks,
+        "breaker_blocks": breaker_blocks,
+        "fvg": fvg,
+        "liquidity_zones": liquidity,
+        "liquidity_sweep": sweep,
+        "premium_discount": premium_discount
+        }
+
 def analyze_asset(symbol, interval="1h"):
     df = get_candles_df(symbol, interval, limit=100)
     if df is None or len(df) < 30:
@@ -244,6 +826,9 @@ def analyze_asset(symbol, interval="1h"):
     atr_val = atr(df, 14).iloc[-1]
     bb_upper, bb_mid, bb_lower = bollinger_bands(close)
     supports, resistances = find_support_resistance(df)
+    
+    # SMC Analysis
+    smc = analyze_smc(df)
     
     trend = "neutral"
     if ema_100 and current_price > ema_50 > ema_100:
@@ -340,7 +925,8 @@ def analyze_asset(symbol, interval="1h"):
             "resistances": [round(r, 5) for r in resistances]
         },
         "reasons": reasons,
-        "score": score
+        "score": score,
+        "smc": smc
     }
 
 
@@ -547,6 +1133,7 @@ def get_upcoming_events(hours_ahead=24, currencies=None):
             continue
     return sorted(upcoming, key=lambda x: x.get("hours_until", 999))
 
+
 def analyze_news_impact(asset, news_list):
     currencies = ASSET_CURRENCIES.get(asset, [])
     base, quote = ASSET_BASE_QUOTE.get(asset, (None, None))
@@ -663,7 +1250,7 @@ def analyze_calendar_impact(asset, upcoming_events):
     }
 
 
-def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles):
+def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles, smc_data):
     default = {
         "available": False,
         "summary": "IA non disponible",
@@ -690,13 +1277,22 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
     for t in news_titles[:5]:
         titles_text += "- " + t[:100] + "\n"
     
-    prompt = "You are a professional Forex analyst. Respond ONLY with valid JSON, no markdown, no text before or after.\n\n"
+    smc_signals_text = ""
+    if smc_data and smc_data.get("smc_signals"):
+        for s in smc_data["smc_signals"][:5]:
+            smc_signals_text += "- " + s + "\n"
+    
+    prompt = "You are a professional Forex analyst using Smart Money Concepts. Respond ONLY with valid JSON.\n\n"
     prompt += "ASSET: " + display_name + "\n\n"
     prompt += "TECHNICAL:\n"
     prompt += "- Signal: " + str(technical.get('signal', 'N/A')) + "\n"
     prompt += "- Confidence: " + str(technical.get('confidence', 0)) + "\n"
     prompt += "- Trend: " + str(technical.get('trend', 'N/A')) + "\n"
     prompt += "- RSI: " + str(technical.get('indicators', {}).get('rsi', 'N/A')) + "\n\n"
+    prompt += "SMART MONEY CONCEPTS:\n"
+    prompt += "- SMC Direction: " + str(smc_data.get('smc_direction', 'N/A') if smc_data else 'N/A') + "\n"
+    prompt += "- SMC Score: " + str(smc_data.get('smc_score', 0) if smc_data else 0) + "\n"
+    prompt += "SMC Signals:\n" + smc_signals_text + "\n"
     prompt += "NEWS:\n"
     prompt += "- Direction: " + str(news_impact.get('direction', 'N/A')) + "\n"
     prompt += "- Bullish: " + str(news_impact.get('bullish_count', 0)) + "\n"
@@ -705,8 +1301,8 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
     prompt += "CALENDAR:\n"
     prompt += "- Imminent high impact: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
     prompt += "- Risk: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
-    prompt += 'Respond STRICTLY with this JSON in French language:\n'
-    prompt += '{"summary":"resume en francais 2-3 phrases","sentiment":"bullish","confidence_adjustment":5,"key_risks":["risque1","risque2"],"recommendation":"courte reco en francais","invalidation_scenario":"ce qui invaliderait en francais"}'
+    prompt += 'Respond STRICTLY with this JSON in French:\n'
+    prompt += '{"summary":"resume 2-3 phrases integrant SMC","sentiment":"bullish","confidence_adjustment":5,"key_risks":["risque1","risque2"],"recommendation":"courte reco","invalidation_scenario":"ce qui invaliderait"}'
     
     response_text = call_openrouter(prompt)
     
@@ -717,7 +1313,6 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
     
     try:
         text = response_text.strip()
-        
         text = re.sub(r'```json\s*', '', text)
         text = re.sub(r'```\s*', '', text)
         text = text.strip()
@@ -731,7 +1326,6 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
             return default
         
         text = text[start:end+1]
-        
         text = re.sub(r'[\x00-\x1f\x7f]', ' ', text)
         text = re.sub(r',(\s*[}\]])', r'\1', text)
         
@@ -753,29 +1347,55 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles)
         default["summary"] = "Reponse IA non parseable"
         return default
 
-
-def generate_smart_signal(asset):
+def generate_smart_signal(asset, main_tf="1h", confirmation_tf=None):
+    """Genere un signal en croisant Technique + SMC + News + Calendrier + IA"""
+    
     symbol = ASSETS.get(asset)
     if not symbol:
         return {"error": "Actif inconnu"}
     
-    tech_h1 = analyze_asset(symbol, "1h")
-    tech_h4 = analyze_asset(symbol, "4h")
+    # Determiner le timeframe de confirmation si non fourni
+    if confirmation_tf is None:
+        confirmation_tf = CONFIRMATION_MAP.get(main_tf, "4h")
     
-    if not tech_h1:
+    # Verifier que les timeframes sont valides
+    if main_tf not in TIMEFRAMES:
+        return {"error": "Timeframe principal invalide"}
+    if confirmation_tf not in TIMEFRAMES:
+        return {"error": "Timeframe de confirmation invalide"}
+    
+    # Analyses techniques + SMC sur les 2 timeframes
+    tech_main = analyze_asset(symbol, TIMEFRAMES[main_tf])
+    tech_conf = analyze_asset(symbol, TIMEFRAMES[confirmation_tf])
+    
+    if not tech_main:
         return {"error": "Analyse impossible"}
     
-    h4_confirmed = False
-    if tech_h4 and tech_h1["signal"] == tech_h4["signal"] and tech_h1["signal"] != "WAIT":
-        h4_confirmed = True
+    # Confirmation timeframe superieur
+    confirmation_ok = False
+    if tech_conf and tech_main["signal"] == tech_conf["signal"] and tech_main["signal"] != "WAIT":
+        confirmation_ok = True
     
+    # SMC des deux timeframes
+    smc_main = tech_main.get("smc")
+    smc_conf = tech_conf.get("smc") if tech_conf else None
+    
+    # SMC confirme si les deux directions correspondent
+    smc_confirmed = False
+    if smc_main and smc_conf:
+        if smc_main["smc_direction"] == smc_conf["smc_direction"] and smc_main["smc_direction"] != "neutral":
+            smc_confirmed = True
+    
+    # News
     all_news = get_cached_news()
-    
     news_impact = analyze_news_impact(asset, all_news)
+    
+    # Calendrier
     currencies = ASSET_CURRENCIES.get(asset, [])
     upcoming = get_upcoming_events(24, currencies)
     calendar_impact = analyze_calendar_impact(asset, upcoming)
     
+    # Titres pour IA
     news_titles = []
     for n in all_news:
         news_curr = n.get("currencies", [])
@@ -786,21 +1406,36 @@ def generate_smart_signal(asset):
         if len(news_titles) >= 5:
             break
     
-    ai_analysis = get_ai_analysis(asset, tech_h1, news_impact, calendar_impact, news_titles)
+    # Analyse IA
+    ai_analysis = get_ai_analysis(asset, tech_main, news_impact, calendar_impact, news_titles, smc_main)
     
-    tech_score = tech_h1["confidence"]
-    if h4_confirmed:
+    # ═══ SYSTEME DE SCORING PONDERE V7 ═══
+    # SMC = 35%, Technique = 20%, News = 20%, Calendrier = 10%, Sentiment = 8%, IA = 7%
+    
+    # 1. Score SMC (35%)
+    smc_score_raw = smc_main.get("smc_score", 0) if smc_main else 0
+    smc_score_normalized = 50 + (smc_score_raw / 2)  # Convertit -100/+100 en 0/100
+    smc_score_normalized = max(0, min(100, smc_score_normalized))
+    if smc_confirmed:
+        smc_score_normalized = min(smc_score_normalized + 15, 95)
+    
+    # 2. Score Technique (20%)
+    tech_score = tech_main["confidence"]
+    if confirmation_ok:
         tech_score = min(tech_score + 10, 95)
     
-    if tech_h1["signal"] == "BUY" and news_impact["direction"] == "BULLISH":
+    # 3. Score News (20%)
+    smc_direction = smc_main.get("smc_direction", "neutral") if smc_main else "neutral"
+    news_dir = news_impact["direction"]
+    
+    if (smc_direction == "bullish" and news_dir == "BULLISH") or (smc_direction == "bearish" and news_dir == "BEARISH"):
         news_match = 100
-    elif tech_h1["signal"] == "SELL" and news_impact["direction"] == "BEARISH":
-        news_match = 100
-    elif news_impact["direction"] == "NEUTRAL":
+    elif news_dir == "NEUTRAL":
         news_match = 50
     else:
         news_match = 20
     
+    # 4. Score Calendrier (10%)
     if calendar_impact["risk_level"] == "HIGH":
         cal_score = 20
     elif calendar_impact["risk_level"] == "MEDIUM":
@@ -808,66 +1443,88 @@ def generate_smart_signal(asset):
     else:
         cal_score = 90
     
+    # 5. Score Sentiment (8%)
     sent_score = 50
     if news_impact["bullish_count"] > news_impact["bearish_count"]:
-        if tech_h1["signal"] == "BUY":
-            sent_score = 75
-        else:
-            sent_score = 25
+        sent_score = 75 if smc_direction == "bullish" else 25
     elif news_impact["bearish_count"] > news_impact["bullish_count"]:
-        if tech_h1["signal"] == "SELL":
-            sent_score = 75
-        else:
-            sent_score = 25
+        sent_score = 75 if smc_direction == "bearish" else 25
     
+    # 6. Score IA (7%)
     ai_score = 50 + ai_analysis.get("confidence_adjustment", 0) * 3
     ai_score = max(0, min(100, ai_score))
     
+    # SCORE FINAL PONDERE
     final_conf = int(round(
-        tech_score * 0.30 +
-        news_match * 0.25 +
-        cal_score * 0.20 +
-        sent_score * 0.15 +
-        ai_score * 0.10
+        smc_score_normalized * 0.35 +
+        tech_score * 0.20 +
+        news_match * 0.20 +
+        cal_score * 0.10 +
+        sent_score * 0.08 +
+        ai_score * 0.07
     ))
     
-    final_signal = tech_h1["signal"]
+    # ═══ DECISION FINALE ═══
+    # Le signal final est base sur SMC + Technique
+    final_signal = "WAIT"
     warnings = []
     
+    # Priorite au SMC si direction claire
+    if smc_direction == "bullish" and tech_main["signal"] in ["BUY", "WAIT"]:
+        final_signal = "BUY"
+    elif smc_direction == "bearish" and tech_main["signal"] in ["SELL", "WAIT"]:
+        final_signal = "SELL"
+    elif tech_main["signal"] == "BUY" and smc_direction != "bearish":
+        final_signal = "BUY"
+    elif tech_main["signal"] == "SELL" and smc_direction != "bullish":
+        final_signal = "SELL"
+    else:
+        final_signal = "WAIT"
+        warnings.append("Conflit entre SMC et Technique")
+    
+    # Regles de securite
     if calendar_impact["imminent_high_impact"] > 0:
         final_signal = "WAIT"
         warnings.append(str(calendar_impact['imminent_high_impact']) + " evenement(s) imminent(s)")
     
     if news_match == 20 and news_impact["high_impact_count"] >= 2:
         final_conf = max(final_conf - 25, 40)
-        warnings.append("News contradictoires")
+        warnings.append("News contradictoires avec SMC")
     
     if final_conf < 60:
         final_signal = "WAIT"
     
+    # Niveau de risque
     risk_level = "LOW"
     if calendar_impact["risk_level"] == "HIGH":
         risk_level = "HIGH"
     elif calendar_impact["risk_level"] == "MEDIUM" or news_impact["high_impact_count"] >= 2:
         risk_level = "MEDIUM"
+    elif not smc_confirmed and not confirmation_ok:
+        risk_level = "MEDIUM"
     
+    # Construction du resultat
     result = {
         "asset": asset,
         "symbol": symbol,
         "timestamp": datetime.utcnow().isoformat(),
+        "main_timeframe": main_tf,
+        "confirmation_timeframe": confirmation_tf,
         "final_signal": final_signal,
         "final_confidence": final_conf,
         "risk_level": risk_level,
-        "h4_confirmed": h4_confirmed,
+        "h4_confirmed": confirmation_ok,
+        "smc_confirmed": smc_confirmed,
         "warnings": warnings,
-        "current_price": tech_h1["current_price"],
-        "entry": tech_h1["entry"] if final_signal != "WAIT" else None,
-        "stop_loss": tech_h1["stop_loss"] if final_signal != "WAIT" else None,
-        "take_profit_1": tech_h1["take_profit_1"] if final_signal != "WAIT" else None,
-        "take_profit_2": tech_h1["take_profit_2"] if final_signal != "WAIT" else None,
-        "take_profit_3": tech_h1["take_profit_3"] if final_signal != "WAIT" else None,
-        "risk_reward": tech_h1["risk_reward"] if final_signal != "WAIT" else None,
+        "current_price": tech_main["current_price"],
+        "entry": tech_main["entry"] if final_signal != "WAIT" else None,
+        "stop_loss": tech_main["stop_loss"] if final_signal != "WAIT" else None,
+        "take_profit_1": tech_main["take_profit_1"] if final_signal != "WAIT" else None,
+        "take_profit_2": tech_main["take_profit_2"] if final_signal != "WAIT" else None,
+        "take_profit_3": tech_main["take_profit_3"] if final_signal != "WAIT" else None,
+        "risk_reward": tech_main["risk_reward"] if final_signal != "WAIT" else None,
         "scores": {
+            "smc": int(smc_score_normalized),
             "technical": int(tech_score),
             "news": int(news_match),
             "calendar": int(cal_score),
@@ -876,12 +1533,26 @@ def generate_smart_signal(asset):
             "final": final_conf
         },
         "technical_analysis": {
-            "trend": tech_h1["trend"],
-            "reasons": tech_h1["reasons"],
-            "indicators": tech_h1["indicators"],
-            "support_resistance": tech_h1["support_resistance"],
-            "h1_signal": tech_h1["signal"],
-            "h4_signal": tech_h4["signal"] if tech_h4 else "N/A"
+            "trend": tech_main["trend"],
+            "reasons": tech_main["reasons"],
+            "indicators": tech_main["indicators"],
+            "support_resistance": tech_main["support_resistance"],
+            "main_signal": tech_main["signal"],
+            "confirmation_signal": tech_conf["signal"] if tech_conf else "N/A"
+        },
+        "smc_analysis": {
+            "direction": smc_direction,
+            "score": smc_score_raw,
+            "signals": smc_main.get("smc_signals", []) if smc_main else [],
+            "market_structure": smc_main.get("market_structure") if smc_main else None,
+            "bos": smc_main.get("bos") if smc_main else None,
+            "choch": smc_main.get("choch") if smc_main else None,
+            "order_blocks": smc_main.get("order_blocks") if smc_main else None,
+            "breaker_blocks": smc_main.get("breaker_blocks") if smc_main else None,
+            "fvg": smc_main.get("fvg") if smc_main else None,
+            "liquidity_zones": smc_main.get("liquidity_zones") if smc_main else None,
+            "liquidity_sweep": smc_main.get("liquidity_sweep") if smc_main else None,
+            "premium_discount": smc_main.get("premium_discount") if smc_main else None
         },
         "news_analysis": {
             "direction": news_impact["direction"],
@@ -900,6 +1571,7 @@ def generate_smart_signal(asset):
         "ai_analysis": ai_analysis
     }
     
+    # Sauvegarde historique
     if final_signal != "WAIT" and final_conf >= 70:
         history_item = {
             "timestamp": result["timestamp"],
@@ -908,7 +1580,8 @@ def generate_smart_signal(asset):
             "confidence": final_conf,
             "entry": result["entry"],
             "stop_loss": result["stop_loss"],
-            "take_profit_1": result["take_profit_1"]
+            "take_profit_1": result["take_profit_1"],
+            "timeframe": main_tf
         }
         SIGNAL_HISTORY.insert(0, history_item)
         if len(SIGNAL_HISTORY) > MAX_HISTORY:
@@ -917,16 +1590,32 @@ def generate_smart_signal(asset):
     return result
 
 
+# ═══════════════════════════════════════════════════════
+#                    ENDPOINTS API
+# ═══════════════════════════════════════════════════════
+
+
 @app.get("/")
 async def root():
     return {
         "status": "online",
-        "message": "TradeVision AI",
-        "version": "6.3.0",
+        "message": "TradeVision AI - Smart Money Concepts",
+        "version": "7.0.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
         "active_model": ACTIVE_MODEL or "not_tested_yet",
-        "auto_ping": "enabled (5 min)"
+        "auto_ping": "enabled (5 min)",
+        "features": [
+            "Technical Analysis",
+            "Smart Money Concepts (BOS, CHOCH, OB, BB, FVG, Liquidity)",
+            "Multi-Timeframes",
+            "News Analysis",
+            "Economic Calendar",
+            "AI Analysis",
+            "Weighted Scoring"
+        ],
+        "supported_timeframes": list(TIMEFRAMES.keys()),
+        "confirmation_map": CONFIRMATION_MAP
     }
 
 
@@ -943,6 +1632,23 @@ async def health():
     }
 
 
+@app.get("/api/v1/timeframes")
+async def get_timeframes():
+    """Retourne les timeframes supportes et le mapping de confirmation"""
+    return {
+        "timeframes": list(TIMEFRAMES.keys()),
+        "confirmation_map": CONFIRMATION_MAP,
+        "descriptions": {
+            "15m": "15 minutes (scalping court)",
+            "30m": "30 minutes (scalping)",
+            "1h": "1 heure (intraday)",
+            "2h": "2 heures (intraday long)",
+            "4h": "4 heures (swing)",
+            "1d": "1 jour (position)"
+        }
+    }
+
+
 @app.get("/api/v1/prices")
 async def get_prices():
     prices = {}
@@ -956,11 +1662,14 @@ async def get_prices():
 
 
 @app.get("/api/v1/signals")
-async def get_signals(min_confidence: int = 70):
+async def get_signals(min_confidence: int = 70, main_tf: str = "1h", confirmation_tf: str = None):
+    """Signaux pour tous les actifs avec timeframes configurables"""
     signals = {}
+    
     for asset in ASSETS.keys():
         try:
-            result = generate_smart_signal(asset)
+            result = generate_smart_signal(asset, main_tf, confirmation_tf)
+            
             if result.get("final_signal") != "WAIT" and result.get("final_confidence", 0) >= min_confidence:
                 signals[asset] = {
                     "status": "ok",
@@ -975,11 +1684,15 @@ async def get_signals(min_confidence: int = 70):
                     "take_profit_3": result["take_profit_3"],
                     "risk_reward": result["risk_reward"],
                     "h4_confirmed": result["h4_confirmed"],
+                    "smc_confirmed": result["smc_confirmed"],
                     "risk_level": result["risk_level"],
                     "reasons": result["technical_analysis"]["reasons"],
                     "warnings": result["warnings"],
                     "scores": result["scores"],
-                    "ai_summary": result["ai_analysis"].get("summary", "")
+                    "ai_summary": result["ai_analysis"].get("summary", ""),
+                    "smc_signals": result["smc_analysis"]["signals"],
+                    "main_timeframe": result["main_timeframe"],
+                    "confirmation_timeframe": result["confirmation_timeframe"]
                 }
             else:
                 signals[asset] = {
@@ -991,19 +1704,28 @@ async def get_signals(min_confidence: int = 70):
                 }
         except Exception as e:
             signals[asset] = {"status": "error", "signal": "WAIT", "error": str(e)}
-    return {"timestamp": datetime.utcnow().isoformat(), "min_confidence": min_confidence, "signals": signals}
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "min_confidence": min_confidence,
+        "main_timeframe": main_tf,
+        "confirmation_timeframe": confirmation_tf or CONFIRMATION_MAP.get(main_tf, "4h"),
+        "signals": signals
+    }
 
 
 @app.get("/api/v1/smart-analysis/{asset}")
-async def smart_analysis(asset: str):
+async def smart_analysis(asset: str, main_tf: str = "1h", confirmation_tf: str = None):
+    """Analyse complete d'un actif avec timeframes configurables"""
     asset = asset.upper()
     if asset not in ASSETS:
         raise HTTPException(status_code=404, detail="Asset not found")
-    return generate_smart_signal(asset)
+    return generate_smart_signal(asset, main_tf, confirmation_tf)
 
 
 @app.get("/api/v1/analyze/{asset}")
 async def analyze_endpoint(asset: str, timeframe: str = "1h"):
+    """Analyse technique + SMC d'un seul timeframe"""
     asset = asset.upper()
     if asset not in ASSETS:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -1013,6 +1735,32 @@ async def analyze_endpoint(asset: str, timeframe: str = "1h"):
     if result is None:
         raise HTTPException(status_code=503, detail="Analysis failed")
     return {"asset": asset, "symbol": ASSETS[asset], "timeframe": timeframe, "timestamp": datetime.utcnow().isoformat(), **result}
+
+
+@app.get("/api/v1/smc/{asset}")
+async def get_smc_only(asset: str, timeframe: str = "1h"):
+    """Retourne uniquement l'analyse SMC"""
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+    
+    df = get_candles_df(ASSETS[asset], TIMEFRAMES[timeframe], limit=100)
+    if df is None:
+        raise HTTPException(status_code=503, detail="No data")
+    
+    smc = analyze_smc(df)
+    if smc is None:
+        raise HTTPException(status_code=503, detail="SMC analysis failed")
+    
+    return {
+        "asset": asset,
+        "symbol": ASSETS[asset],
+        "timeframe": timeframe,
+        "timestamp": datetime.utcnow().isoformat(),
+        **smc
+    }
 
 
 @app.get("/api/v1/candles/{asset}")
