@@ -1257,6 +1257,13 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
         "sentiment": "neutral",
         "confidence_adjustment": 0,
         "key_risks": [],
+def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles, smc_data):
+    default = {
+        "available": False,
+        "summary": "IA non disponible",
+        "sentiment": "neutral",
+        "confidence_adjustment": 0,
+        "key_risks": [],
         "recommendation": "",
         "invalidation_scenario": "",
         "model_used": "none"
@@ -1273,36 +1280,20 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
     
     display_name = ASSETS.get(asset, asset)
     
-    titles_text = ""
-    for t in news_titles[:5]:
-        titles_text += "- " + t[:100] + "\n"
+    smc_dir = smc_data.get('smc_direction', 'N/A') if smc_data else 'N/A'
+    smc_scr = smc_data.get('smc_score', 0) if smc_data else 0
     
-    smc_signals_text = ""
-    if smc_data and smc_data.get("smc_signals"):
-        for s in smc_data["smc_signals"][:5]:
-            smc_signals_text += "- " + s + "\n"
-    
-    prompt = "You are a professional Forex analyst using Smart Money Concepts. Respond ONLY with valid JSON.\n\n"
-    prompt += "ASSET: " + display_name + "\n\n"
-    prompt += "TECHNICAL:\n"
-    prompt += "- Signal: " + str(technical.get('signal', 'N/A')) + "\n"
-    prompt += "- Confidence: " + str(technical.get('confidence', 0)) + "\n"
-    prompt += "- Trend: " + str(technical.get('trend', 'N/A')) + "\n"
-    prompt += "- RSI: " + str(technical.get('indicators', {}).get('rsi', 'N/A')) + "\n\n"
-    prompt += "SMART MONEY CONCEPTS:\n"
-    prompt += "- SMC Direction: " + str(smc_data.get('smc_direction', 'N/A') if smc_data else 'N/A') + "\n"
-    prompt += "- SMC Score: " + str(smc_data.get('smc_score', 0) if smc_data else 0) + "\n"
-    prompt += "SMC Signals:\n" + smc_signals_text + "\n"
-    prompt += "NEWS:\n"
-    prompt += "- Direction: " + str(news_impact.get('direction', 'N/A')) + "\n"
-    prompt += "- Bullish: " + str(news_impact.get('bullish_count', 0)) + "\n"
-    prompt += "- Bearish: " + str(news_impact.get('bearish_count', 0)) + "\n"
-    prompt += "Titles:\n" + titles_text + "\n"
-    prompt += "CALENDAR:\n"
-    prompt += "- Imminent high impact: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
-    prompt += "- Risk: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
-    prompt += 'Respond STRICTLY with this JSON in French:\n'
-    prompt += '{"summary":"resume 2-3 phrases integrant SMC","sentiment":"bullish","confidence_adjustment":5,"key_risks":["risque1","risque2"],"recommendation":"courte reco","invalidation_scenario":"ce qui invaliderait"}'
+    prompt = "Tu es analyste Forex. Reponds UNIQUEMENT en JSON valide, rien d'autre.\n\n"
+    prompt += "Actif: " + display_name + "\n"
+    prompt += "Signal technique: " + str(technical.get('signal', 'N/A')) + " (confiance " + str(technical.get('confidence', 0)) + "%)\n"
+    prompt += "Tendance: " + str(technical.get('trend', 'N/A')) + "\n"
+    prompt += "RSI: " + str(technical.get('indicators', {}).get('rsi', 'N/A')) + "\n"
+    prompt += "SMC direction: " + str(smc_dir) + " (score " + str(smc_scr) + ")\n"
+    prompt += "News direction: " + str(news_impact.get('direction', 'N/A')) + " (" + str(news_impact.get('bullish_count', 0)) + " bull, " + str(news_impact.get('bearish_count', 0)) + " bear)\n"
+    prompt += "Evenements imminents: " + str(calendar_impact.get('imminent_high_impact', 0)) + "\n"
+    prompt += "Risque calendrier: " + str(calendar_impact.get('risk_level', 'LOW')) + "\n\n"
+    prompt += "Reponds SEULEMENT ce JSON (en francais, sans markdown, sans texte avant/apres):\n"
+    prompt += '{"summary":"analyse en 2 phrases","sentiment":"bullish ou bearish ou neutral","confidence_adjustment":5,"key_risks":["risque1","risque2"],"recommendation":"reco courte","invalidation_scenario":"scenario invalidation"}'
     
     response_text = call_openrouter(prompt)
     
@@ -1346,6 +1337,7 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
         print("AI parse error:", str(e)[:200])
         default["summary"] = "Reponse IA non parseable"
         return default
+        
 
 def generate_smart_signal(asset, main_tf="1h", confirmation_tf=None):
     """Genere un signal en croisant Technique + SMC + News + Calendrier + IA"""
