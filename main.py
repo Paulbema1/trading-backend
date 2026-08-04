@@ -1,5 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 import requests
 import os
 import pandas as pd
@@ -12,7 +19,15 @@ import time
 import threading
 from datetime import datetime, timedelta
 
-app = FastAPI(title="TradeVision AI", version="7.0.1")
+# Firebase
+import firebase_admin
+from firebase_admin import credentials, messaging
+
+# ═══════════════════════════════════════════════
+#              CONFIGURATION
+# ═══════════════════════════════════════════════
+
+app = FastAPI(title="TradeVision AI", version="8.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,10 +37,189 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Variables d'environnement
 API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tradevision.db")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
+FIREBASE_CLIENT_EMAIL = os.getenv("FIREBASE_CLIENT_EMAIL", "")
+FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n")
+JWT_SECRET = os.getenv("JWT_SECRET", "tradevision-super-secret-key-change-me-in-prod")
+
 BASE_URL = "https://api.twelvedata.com"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Fix pour Render PostgreSQL URL
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# ═══════════════════════════════════════════════
+#              BASE DE DONNEES
+# ═══════════════════════════════════════════════
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
+    
+    # Paramètres utilisateur
+    main_timeframe = Column(String(10), default="1h")
+    confirmation_timeframe = Column(String(10), default="4h")
+    auto_confirmation = Column(Boolean, default=True)
+    min_confidence = Column(Integer, default=70)
+    notifications_enabled = Column(Boolean, default=True)
+    refresh_interval = Column(Integer, default=5)
+    
+    # FCM Token pour notifications
+    fcm_token = Column(String(500), default="")
+
+
+class SignalNotification(Base):
+    __tablename__ = "signal_notifications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    asset = Column(String(20))
+    signal_type = Column(String(10))
+    confidence = Column(Integer)
+    signal_key = Column(String(50))  # Pour éviter doublons
+    sent_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Créer les tables au démarrage
+try:
+    Base.metadata.create_all(bind=engine)
+    print("Base de donnees initialisee")
+except Exception as e:
+    print(f"Erreur base de donnees: {e}")
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ═══════════════════════════════════════════════
+#              AUTHENTIFICATION
+# ═══════════════════════════════════════════════
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/login")
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_DAYS = 30
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token invalide ou expire",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+# ═══════════════════════════════════════════════
+#              FIREBASE
+# ═══════════════════════════════════════════════
+
+FIREBASE_APP = None
+
+try:
+    if FIREBASE_PROJECT_ID and FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY:
+        firebase_cred_dict = {
+            "type": "service_account",
+            "project_id": FIREBASE_PROJECT_ID,
+            "private_key": FIREBASE_PRIVATE_KEY,
+            "client_email": FIREBASE_CLIENT_EMAIL,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+        cred = credentials.Certificate(firebase_cred_dict)
+        FIREBASE_APP = firebase_admin.initialize_app(cred)
+        print("Firebase initialise avec succes")
+    else:
+        print("Firebase non configure (variables manquantes)")
+except Exception as e:
+    print(f"Erreur Firebase: {e}")
+
+
+def send_push_notification(fcm_token: str, title: str, body: str, data: dict = None):
+    """Envoie une notification push via Firebase"""
+    if not FIREBASE_APP or not fcm_token:
+        return False
+    
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data=data or {},
+            token=fcm_token,
+            android=messaging.AndroidConfig(
+                priority='high',
+                notification=messaging.AndroidNotification(
+                    channel_id='trading_signals_channel',
+                    priority='high',
+                    default_sound=True,
+                    default_vibrate_timings=True,
+                )
+            )
+        )
+        response = messaging.send(message)
+        print(f"Notification envoyee: {response}")
+        return True
+    except Exception as e:
+        print(f"Erreur envoi notification: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════
+#              CONFIG TRADING
+# ═══════════════════════════════════════════════
 
 OPENROUTER_MODELS = [
     "nvidia/nemotron-nano-9b-v2:free",
@@ -94,9 +288,10 @@ NEWS_CACHE_DURATION = 900
 CALENDAR_CACHE_DURATION = 1800
 AI_CACHE_DURATION = 900
 
-SIGNAL_HISTORY = []
-MAX_HISTORY = 100
 
+# ═══════════════════════════════════════════════
+#              KEEP ALIVE
+# ═══════════════════════════════════════════════
 
 def keep_alive():
     while True:
@@ -112,6 +307,10 @@ keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
 keep_alive_thread.start()
 print("Auto-ping thread demarre (5 min interval)")
 
+
+# ═══════════════════════════════════════════════
+#              FONCTIONS UTILITAIRES
+# ═══════════════════════════════════════════════
 
 def call_openrouter(prompt, max_retries=3):
     global ACTIVE_MODEL
@@ -150,7 +349,6 @@ def call_openrouter(prompt, max_retries=3):
                 
                 if response.status_code == 429:
                     wait_time = 2 ** attempt
-                    print("Rate limit, waiting " + str(wait_time) + "s")
                     time.sleep(wait_time)
                     continue
                 
@@ -163,7 +361,6 @@ def call_openrouter(prompt, max_retries=3):
                             print("Active model: " + model)
                         return content
                 else:
-                    print("OpenRouter error " + str(response.status_code) + " for " + model)
                     break
                     
             except Exception as e:
@@ -241,6 +438,10 @@ def find_support_resistance(df, window=10):
     resistances = df["high"][df["high"] == highs].dropna().tail(3).tolist()
     supports = df["low"][df["low"] == lows].dropna().tail(3).tolist()
     return supports, resistances
+
+# ═══════════════════════════════════════════════
+#         SMART MONEY CONCEPTS (SMC)
+# ═══════════════════════════════════════════════
 
 def find_swing_points(df, lookback=5):
     swing_highs = []
@@ -752,7 +953,11 @@ def analyze_smc(df):
         "liquidity_zones": liquidity,
         "liquidity_sweep": sweep,
         "premium_discount": premium_discount
-    }
+                   }
+
+# ═══════════════════════════════════════════════
+#           ANALYSE TECHNIQUE
+# ═══════════════════════════════════════════════
 
 def analyze_asset(symbol, interval="1h"):
     df = get_candles_df(symbol, interval, limit=100)
@@ -874,6 +1079,10 @@ def analyze_asset(symbol, interval="1h"):
         "smc": smc
     }
 
+
+# ═══════════════════════════════════════════════
+#              NEWS ANALYSIS
+# ═══════════════════════════════════════════════
 
 def clean_html_text(text):
     if not text:
@@ -1008,7 +1217,6 @@ def get_cached_news():
         return all_news
     
     if NEWS_CACHE["data"]:
-        print("Utilisation cache news ancien")
         return NEWS_CACHE["data"]
     
     return []
@@ -1054,7 +1262,6 @@ def get_cached_calendar():
         return events
     
     if CALENDAR_CACHE["data"]:
-        print("Utilisation cache calendrier ancien")
         return CALENDAR_CACHE["data"]
     
     return []
@@ -1238,8 +1445,6 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
     if not response_text:
         return default
     
-    print("AI raw response:", response_text[:300])
-    
     try:
         text = response_text.strip()
         text = re.sub(r'```json\s*', '', text)
@@ -1250,7 +1455,6 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
         end = text.rfind('}')
         
         if start == -1 or end == -1:
-            print("AI: Pas de JSON dans la reponse")
             default["summary"] = "Reponse IA sans JSON"
             return default
         
@@ -1272,9 +1476,12 @@ def get_ai_analysis(asset, technical, news_impact, calendar_impact, news_titles,
         AI_CACHE[cache_key] = result
         return result
     except Exception as e:
-        print("AI parse error:", str(e)[:200])
         default["summary"] = "Reponse IA non parseable"
         return default
+
+# ═══════════════════════════════════════════════
+#         MOTEUR DE FUSION SMART SIGNAL
+# ═══════════════════════════════════════════════
 
 def generate_smart_signal(asset, main_tf="1h", confirmation_tf=None):
     symbol = ASSETS.get(asset)
@@ -1472,45 +1679,178 @@ def generate_smart_signal(asset, main_tf="1h", confirmation_tf=None):
         "ai_analysis": ai_analysis
     }
     
-    if final_signal != "WAIT" and final_conf >= 70:
-        history_item = {
-            "timestamp": result["timestamp"],
-            "asset": asset,
-            "signal": final_signal,
-            "confidence": final_conf,
-            "entry": result["entry"],
-            "stop_loss": result["stop_loss"],
-            "take_profit_1": result["take_profit_1"],
-            "timeframe": main_tf
-        }
-        SIGNAL_HISTORY.insert(0, history_item)
-        if len(SIGNAL_HISTORY) > MAX_HISTORY:
-            SIGNAL_HISTORY.pop()
-    
     return result
 
+
+# ═══════════════════════════════════════════════
+#      SCHEDULER NOTIFICATIONS AUTOMATIQUES
+# ═══════════════════════════════════════════════
+
+def send_signal_to_users(asset, signal_data):
+    """Envoie une notification à tous les users qui ont activé les notifs"""
+    db = SessionLocal()
+    try:
+        users = db.query(User).filter(
+            User.notifications_enabled == True,
+            User.fcm_token != ""
+        ).all()
+        
+        signal_type = signal_data.get("final_signal", "WAIT")
+        confidence = signal_data.get("final_confidence", 0)
+        signal_key = f"{asset}_{signal_type}_{confidence}_{int(time.time() // 3600)}"
+        
+        display_name = ASSETS.get(asset, asset)
+        
+        for user in users:
+            # Vérifier si confiance suffisante pour cet user
+            if confidence < user.min_confidence:
+                continue
+            
+            # Vérifier si déjà notifié dans la dernière heure
+            existing = db.query(SignalNotification).filter(
+                SignalNotification.user_id == user.id,
+                SignalNotification.signal_key == signal_key
+            ).first()
+            
+            if existing:
+                continue
+            
+            # Envoyer la notification
+            signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
+            signal_text = "ACHAT" if signal_type == "BUY" else "VENTE"
+            
+            title = f"{signal_emoji} {signal_text} {display_name} - {confidence}%"
+            body = f"Entrée: {signal_data.get('entry')} | SL: {signal_data.get('stop_loss')} | TP: {signal_data.get('take_profit_1')}"
+            
+            data = {
+                "asset": asset,
+                "signal": signal_type,
+                "confidence": str(confidence),
+                "entry": str(signal_data.get("entry", "")),
+                "stop_loss": str(signal_data.get("stop_loss", "")),
+                "take_profit": str(signal_data.get("take_profit_1", ""))
+            }
+            
+            success = send_push_notification(user.fcm_token, title, body, data)
+            
+            if success:
+                # Enregistrer la notification pour éviter doublons
+                notif = SignalNotification(
+                    user_id=user.id,
+                    asset=asset,
+                    signal_type=signal_type,
+                    confidence=confidence,
+                    signal_key=signal_key
+                )
+                db.add(notif)
+        
+        db.commit()
+    except Exception as e:
+        print(f"Erreur send_signal_to_users: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def scheduler_analyze_and_notify():
+    """Analyse continue toutes les 5 minutes et envoie notifications"""
+    while True:
+        try:
+            time.sleep(300)  # 5 minutes
+            
+            print(f"[{datetime.utcnow()}] Scheduler: analyse automatique...")
+            
+            for asset in ASSETS.keys():
+                try:
+                    result = generate_smart_signal(asset, "1h", "4h")
+                    
+                    if isinstance(result, dict) and result.get("final_signal") in ["BUY", "SELL"]:
+                        conf = result.get("final_confidence", 0)
+                        if conf >= 70:
+                            print(f"Signal detecte {asset}: {result['final_signal']} ({conf}%)")
+                            send_signal_to_users(asset, result)
+                except Exception as e:
+                    print(f"Erreur scheduler pour {asset}: {e}")
+            
+            # Nettoyer les vieilles notifications (>7 jours)
+            try:
+                db = SessionLocal()
+                cutoff = datetime.utcnow() - timedelta(days=7)
+                db.query(SignalNotification).filter(
+                    SignalNotification.sent_at < cutoff
+                ).delete()
+                db.commit()
+                db.close()
+            except Exception as e:
+                print(f"Erreur nettoyage: {e}")
+                
+        except Exception as e:
+            print(f"Erreur scheduler global: {e}")
+
+
+# Démarrer le scheduler en arrière-plan
+scheduler_thread = threading.Thread(target=scheduler_analyze_and_notify, daemon=True)
+scheduler_thread.start()
+print("Scheduler notifications demarre (5 min interval)")
+
+
+# ═══════════════════════════════════════════════
+#              MODELES PYDANTIC
+# ═══════════════════════════════════════════════
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    username: str
+
+
+class FCMTokenUpdate(BaseModel):
+    fcm_token: str
+
+
+class UserSettingsUpdate(BaseModel):
+    main_timeframe: str = None
+    confirmation_timeframe: str = None
+    auto_confirmation: bool = None
+    min_confidence: int = None
+    notifications_enabled: bool = None
+    refresh_interval: int = None
+
+# ═══════════════════════════════════════════════
+#              ENDPOINTS PUBLICS
+# ═══════════════════════════════════════════════
 
 @app.get("/")
 async def root():
     return {
         "status": "online",
-        "message": "TradeVision AI - Smart Money Concepts",
-        "version": "7.0.1",
+        "message": "TradeVision AI - Multi-Users",
+        "version": "8.0.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
         "active_model": ACTIVE_MODEL or "not_tested_yet",
-        "auto_ping": "enabled (5 min)",
+        "firebase_configured": bool(FIREBASE_APP),
+        "database_connected": True,
         "features": [
+            "User Authentication (JWT)",
+            "PostgreSQL Database",
+            "Firebase Push Notifications",
+            "Auto Scheduler (5 min)",
             "Technical Analysis",
-            "Smart Money Concepts (BOS, CHOCH, OB, BB, FVG, Liquidity)",
+            "Smart Money Concepts",
             "Multi-Timeframes",
-            "News Analysis",
-            "Economic Calendar",
-            "AI Analysis",
-            "Weighted Scoring"
-        ],
-        "supported_timeframes": list(TIMEFRAMES.keys()),
-        "confirmation_map": CONFIRMATION_MAP
+            "AI Analysis"
+        ]
     }
 
 
@@ -1520,12 +1860,204 @@ async def health():
         "status": "healthy",
         "twelve_data_configured": bool(API_KEY),
         "openrouter_configured": bool(OPENROUTER_API_KEY),
+        "firebase_configured": bool(FIREBASE_APP),
         "active_model": ACTIVE_MODEL or "not_tested_yet",
         "news_cached": bool(NEWS_CACHE["data"]),
-        "calendar_cached": bool(CALENDAR_CACHE["data"]),
-        "signals_in_history": len(SIGNAL_HISTORY)
+        "calendar_cached": bool(CALENDAR_CACHE["data"])
     }
 
+
+# ═══════════════════════════════════════════════
+#              AUTHENTIFICATION
+# ═══════════════════════════════════════════════
+
+@app.post("/api/v1/auth/register", response_model=TokenResponse)
+async def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    """Créer un nouveau compte"""
+    
+    # Validation
+    if len(user_data.username) < 3:
+        raise HTTPException(status_code=400, detail="Nom d'utilisateur trop court (min 3 caracteres)")
+    
+    if len(user_data.password) < 4:
+        raise HTTPException(status_code=400, detail="Mot de passe trop court (min 4 caracteres)")
+    
+    # Vérifier si username existe déjà
+    existing = db.query(User).filter(User.username == user_data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Ce nom d'utilisateur existe deja")
+    
+    # Créer l'utilisateur
+    hashed_pwd = hash_password(user_data.password)
+    new_user = User(
+        username=user_data.username,
+        password_hash=hashed_pwd
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Créer le token JWT
+    access_token = create_access_token(data={"sub": new_user.username})
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": new_user.username
+    }
+
+
+@app.post("/api/v1/auth/login", response_model=TokenResponse)
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """Se connecter"""
+    user = db.query(User).filter(User.username == form_data.username).first()
+    
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Nom d'utilisateur ou mot de passe incorrect"
+        )
+    
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Compte desactive")
+    
+    access_token = create_access_token(data={"sub": user.username})
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username
+    }
+
+
+@app.post("/api/v1/auth/login-simple", response_model=TokenResponse)
+async def login_simple(user_data: UserLogin, db: Session = Depends(get_db)):
+    """Login simple avec JSON (pour l'app Android)"""
+    user = db.query(User).filter(User.username == user_data.username).first()
+    
+    if not user or not verify_password(user_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Nom d'utilisateur ou mot de passe incorrect"
+        )
+    
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Compte desactive")
+    
+    access_token = create_access_token(data={"sub": user.username})
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "username": user.username
+    }
+
+
+@app.get("/api/v1/auth/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    """Récupère les infos du user connecté"""
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "is_admin": current_user.is_admin,
+        "settings": {
+            "main_timeframe": current_user.main_timeframe,
+            "confirmation_timeframe": current_user.confirmation_timeframe,
+            "auto_confirmation": current_user.auto_confirmation,
+            "min_confidence": current_user.min_confidence,
+            "notifications_enabled": current_user.notifications_enabled,
+            "refresh_interval": current_user.refresh_interval
+        }
+    }
+
+
+# ═══════════════════════════════════════════════
+#              PARAMETRES UTILISATEUR
+# ═══════════════════════════════════════════════
+
+@app.put("/api/v1/user/settings")
+async def update_settings(
+    settings: UserSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Met à jour les paramètres de l'utilisateur"""
+    if settings.main_timeframe is not None:
+        if settings.main_timeframe in TIMEFRAMES:
+            current_user.main_timeframe = settings.main_timeframe
+    
+    if settings.confirmation_timeframe is not None:
+        if settings.confirmation_timeframe in TIMEFRAMES:
+            current_user.confirmation_timeframe = settings.confirmation_timeframe
+    
+    if settings.auto_confirmation is not None:
+        current_user.auto_confirmation = settings.auto_confirmation
+    
+    if settings.min_confidence is not None:
+        if 60 <= settings.min_confidence <= 95:
+            current_user.min_confidence = settings.min_confidence
+    
+    if settings.notifications_enabled is not None:
+        current_user.notifications_enabled = settings.notifications_enabled
+    
+    if settings.refresh_interval is not None:
+        if settings.refresh_interval in [5, 10, 15, 30]:
+            current_user.refresh_interval = settings.refresh_interval
+    
+    db.commit()
+    db.refresh(current_user)
+    
+    return {
+        "message": "Parametres mis a jour",
+        "settings": {
+            "main_timeframe": current_user.main_timeframe,
+            "confirmation_timeframe": current_user.confirmation_timeframe,
+            "auto_confirmation": current_user.auto_confirmation,
+            "min_confidence": current_user.min_confidence,
+            "notifications_enabled": current_user.notifications_enabled,
+            "refresh_interval": current_user.refresh_interval
+        }
+    }
+
+
+@app.post("/api/v1/user/fcm-token")
+async def update_fcm_token(
+    token_data: FCMTokenUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Enregistre le FCM token pour recevoir les notifications"""
+    current_user.fcm_token = token_data.fcm_token
+    db.commit()
+    return {"message": "FCM token enregistre avec succes"}
+
+
+@app.get("/api/v1/user/stats")
+async def get_user_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Statistiques des notifications reçues par le user"""
+    total = db.query(SignalNotification).filter(
+        SignalNotification.user_id == current_user.id
+    ).count()
+    
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    last_week = db.query(SignalNotification).filter(
+        SignalNotification.user_id == current_user.id,
+        SignalNotification.sent_at >= week_ago
+    ).count()
+    
+    return {
+        "total_notifications": total,
+        "last_7_days": last_week
+    }
+
+
+# ═══════════════════════════════════════════════
+#              ENDPOINTS TRADING
+# ═══════════════════════════════════════════════
 
 @app.get("/api/v1/timeframes")
 async def get_timeframes():
@@ -1556,7 +2088,12 @@ async def get_prices():
 
 
 @app.get("/api/v1/signals")
-async def get_signals(min_confidence: int = 70, main_tf: str = "1h", confirmation_tf: str = None):
+async def get_signals(
+    min_confidence: int = 70,
+    main_tf: str = "1h",
+    confirmation_tf: str = None
+):
+    """Signaux publics (pour compatibilité)"""
     signals = {}
     
     for asset in ASSETS.keys():
@@ -1603,6 +2140,64 @@ async def get_signals(min_confidence: int = 70, main_tf: str = "1h", confirmatio
         "min_confidence": min_confidence,
         "main_timeframe": main_tf,
         "confirmation_timeframe": confirmation_tf or CONFIRMATION_MAP.get(main_tf, "4h"),
+        "signals": signals
+    }
+
+
+@app.get("/api/v1/user/signals")
+async def get_user_signals(current_user: User = Depends(get_current_user)):
+    """Signaux personnalisés selon les paramètres de l'utilisateur"""
+    main_tf = current_user.main_timeframe
+    confirm_tf = current_user.confirmation_timeframe if not current_user.auto_confirmation else CONFIRMATION_MAP.get(main_tf, "4h")
+    min_conf = current_user.min_confidence
+    
+    signals = {}
+    
+    for asset in ASSETS.keys():
+        try:
+            result = generate_smart_signal(asset, main_tf, confirm_tf)
+            
+            if result.get("final_signal") != "WAIT" and result.get("final_confidence", 0) >= min_conf:
+                signals[asset] = {
+                    "status": "ok",
+                    "signal": result["final_signal"],
+                    "confidence": result["final_confidence"],
+                    "trend": result["technical_analysis"]["trend"],
+                    "current_price": result["current_price"],
+                    "entry": result["entry"],
+                    "stop_loss": result["stop_loss"],
+                    "take_profit_1": result["take_profit_1"],
+                    "take_profit_2": result["take_profit_2"],
+                    "take_profit_3": result["take_profit_3"],
+                    "risk_reward": result["risk_reward"],
+                    "h4_confirmed": result["h4_confirmed"],
+                    "smc_confirmed": result["smc_confirmed"],
+                    "risk_level": result["risk_level"],
+                    "reasons": result["technical_analysis"]["reasons"],
+                    "warnings": result["warnings"],
+                    "scores": result["scores"],
+                    "ai_summary": result["ai_analysis"].get("summary", ""),
+                    "smc_signals": result["smc_analysis"]["signals"],
+                    "main_timeframe": result["main_timeframe"],
+                    "confirmation_timeframe": result["confirmation_timeframe"]
+                }
+            else:
+                signals[asset] = {
+                    "status": "wait",
+                    "signal": "WAIT",
+                    "confidence": result.get("final_confidence", 0),
+                    "reason": "Confiance insuffisante",
+                    "warnings": result.get("warnings", [])
+                }
+        except Exception as e:
+            signals[asset] = {"status": "error", "signal": "WAIT", "error": str(e)}
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "username": current_user.username,
+        "min_confidence": min_conf,
+        "main_timeframe": main_tf,
+        "confirmation_timeframe": confirm_tf,
         "signals": signals
     }
 
@@ -1711,18 +2306,37 @@ async def get_calendar(currency: str = None, impact: str = None):
     return {"timestamp": datetime.utcnow().isoformat(), "count": len(events), "events": events, "cached": True}
 
 
-@app.get("/api/v1/history")
-async def get_history(limit: int = 50):
+# ═══════════════════════════════════════════════
+#              ADMIN (Debug)
+# ═══════════════════════════════════════════════
+
+@app.get("/api/v1/admin/users-count")
+async def admin_users_count(db: Session = Depends(get_db)):
+    """Nombre d'utilisateurs (public pour debug)"""
+    total = db.query(User).count()
+    with_fcm = db.query(User).filter(User.fcm_token != "").count()
+    notifs_enabled = db.query(User).filter(User.notifications_enabled == True).count()
     return {
-        "timestamp": datetime.utcnow().isoformat(),
-        "count": len(SIGNAL_HISTORY),
-        "signals": SIGNAL_HISTORY[:limit]
+        "total_users": total,
+        "users_with_fcm": with_fcm,
+        "notifications_enabled": notifs_enabled
     }
 
 
-@app.delete("/api/v1/history")
-async def clear_history():
-    global SIGNAL_HISTORY
-    count = len(SIGNAL_HISTORY)
-    SIGNAL_HISTORY = []
-    return {"cleared": count, "message": "Historique efface"}
+@app.post("/api/v1/admin/test-notification")
+async def admin_test_notification(current_user: User = Depends(get_current_user)):
+    """Envoie une notification de test au user connecté"""
+    if not current_user.fcm_token:
+        raise HTTPException(status_code=400, detail="Aucun FCM token enregistre")
+    
+    success = send_push_notification(
+        current_user.fcm_token,
+        "🧪 Test TradeVision AI",
+        "Ceci est une notification de test. Si tu vois ça, tout fonctionne !",
+        {"type": "test"}
+    )
+    
+    if success:
+        return {"message": "Notification envoyee avec succes"}
+    else:
+        raise HTTPException(status_code=500, detail="Echec envoi notification")
