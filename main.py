@@ -27,7 +27,7 @@ from firebase_admin import credentials, messaging
 #              CONFIGURATION
 # ═══════════════════════════════════════════════
 
-app = FastAPI(title="TradeVision AI", version="8.0.0")
+app = FastAPI(title="TradeVision AI", version="8.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,7 +72,6 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, default=False)
     
-    # Paramètres utilisateur
     main_timeframe = Column(String(10), default="1h")
     confirmation_timeframe = Column(String(10), default="4h")
     auto_confirmation = Column(Boolean, default=True)
@@ -80,7 +79,6 @@ class User(Base):
     notifications_enabled = Column(Boolean, default=True)
     refresh_interval = Column(Integer, default=5)
     
-    # FCM Token pour notifications
     fcm_token = Column(String(500), default="")
 
 
@@ -92,11 +90,10 @@ class SignalNotification(Base):
     asset = Column(String(20))
     signal_type = Column(String(10))
     confidence = Column(Integer)
-    signal_key = Column(String(50))  # Pour éviter doublons
+    signal_key = Column(String(50))
     sent_at = Column(DateTime, default=datetime.utcnow)
 
 
-# Créer les tables au démarrage
 try:
     Base.metadata.create_all(bind=engine)
     print("Base de donnees initialisee")
@@ -181,13 +178,12 @@ try:
         FIREBASE_APP = firebase_admin.initialize_app(cred)
         print("Firebase initialise avec succes")
     else:
-        print("Firebase non configure (variables manquantes)")
+        print("Firebase non configure")
 except Exception as e:
     print(f"Erreur Firebase: {e}")
 
 
 def send_push_notification(fcm_token: str, title: str, body: str, data: dict = None):
-    """Envoie une notification push via Firebase"""
     if not FIREBASE_APP or not fcm_token:
         return False
     
@@ -289,10 +285,6 @@ CALENDAR_CACHE_DURATION = 1800
 AI_CACHE_DURATION = 900
 
 
-# ═══════════════════════════════════════════════
-#              KEEP ALIVE
-# ═══════════════════════════════════════════════
-
 def keep_alive():
     while True:
         time.sleep(300)
@@ -307,10 +299,6 @@ keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
 keep_alive_thread.start()
 print("Auto-ping thread demarre (5 min interval)")
 
-
-# ═══════════════════════════════════════════════
-#              FONCTIONS UTILITAIRES
-# ═══════════════════════════════════════════════
 
 def call_openrouter(prompt, max_retries=3):
     global ACTIVE_MODEL
@@ -953,7 +941,7 @@ def analyze_smc(df):
         "liquidity_zones": liquidity,
         "liquidity_sweep": sweep,
         "premium_discount": premium_discount
-                   }
+    }
 
 # ═══════════════════════════════════════════════
 #           ANALYSE TECHNIQUE
@@ -1702,11 +1690,9 @@ def send_signal_to_users(asset, signal_data):
         display_name = ASSETS.get(asset, asset)
         
         for user in users:
-            # Vérifier si confiance suffisante pour cet user
             if confidence < user.min_confidence:
                 continue
             
-            # Vérifier si déjà notifié dans la dernière heure
             existing = db.query(SignalNotification).filter(
                 SignalNotification.user_id == user.id,
                 SignalNotification.signal_key == signal_key
@@ -1715,26 +1701,43 @@ def send_signal_to_users(asset, signal_data):
             if existing:
                 continue
             
-            # Envoyer la notification
+            # Notification avec format ameliore
             signal_emoji = "🟢" if signal_type == "BUY" else "🔴"
             signal_text = "ACHAT" if signal_type == "BUY" else "VENTE"
             
-            title = f"{signal_emoji} {signal_text} {display_name} - {confidence}%"
-            body = f"Entrée: {signal_data.get('entry')} | SL: {signal_data.get('stop_loss')} | TP: {signal_data.get('take_profit_1')}"
+            entry_val = signal_data.get('entry') or 'N/A'
+            sl_val = signal_data.get('stop_loss') or 'N/A'
+            tp1_val = signal_data.get('take_profit_1') or 'N/A'
+            tp2_val = signal_data.get('take_profit_2') or 'N/A'
+            current_price = signal_data.get('current_price') or 'N/A'
+            risk_level = signal_data.get('risk_level', 'MEDIUM')
+            rr = signal_data.get('risk_reward', 2.0)
+            
+            risk_emoji = "🔴" if risk_level == "HIGH" else ("🟡" if risk_level == "MEDIUM" else "🟢")
+            
+            title = f"{signal_emoji} {signal_text} {display_name}  •  {confidence}%"
+            
+            body = (
+                f"💰 Prix actuel : {current_price}\n"
+                f"🎯 Entrée : {entry_val}\n"
+                f"🛑 Stop Loss : {sl_val}\n"
+                f"✅ TP1 : {tp1_val}\n"
+                f"✅ TP2 : {tp2_val}\n"
+                f"📊 R/R : 1:{rr}  •  {risk_emoji} Risque {risk_level}"
+            )
             
             data = {
                 "asset": asset,
                 "signal": signal_type,
                 "confidence": str(confidence),
-                "entry": str(signal_data.get("entry", "")),
-                "stop_loss": str(signal_data.get("stop_loss", "")),
-                "take_profit": str(signal_data.get("take_profit_1", ""))
+                "entry": str(entry_val),
+                "stop_loss": str(sl_val),
+                "take_profit": str(tp1_val)
             }
             
             success = send_push_notification(user.fcm_token, title, body, data)
             
             if success:
-                # Enregistrer la notification pour éviter doublons
                 notif = SignalNotification(
                     user_id=user.id,
                     asset=asset,
@@ -1766,13 +1769,12 @@ def scheduler_analyze_and_notify():
                     
                     if isinstance(result, dict) and result.get("final_signal") in ["BUY", "SELL"]:
                         conf = result.get("final_confidence", 0)
-                        if conf >= 70:
+                        if conf >= 60:
                             print(f"Signal detecte {asset}: {result['final_signal']} ({conf}%)")
                             send_signal_to_users(asset, result)
                 except Exception as e:
                     print(f"Erreur scheduler pour {asset}: {e}")
             
-            # Nettoyer les vieilles notifications (>7 jours)
             try:
                 db = SessionLocal()
                 cutoff = datetime.utcnow() - timedelta(days=7)
@@ -1788,10 +1790,9 @@ def scheduler_analyze_and_notify():
             print(f"Erreur scheduler global: {e}")
 
 
-# Démarrer le scheduler en arrière-plan
 scheduler_thread = threading.Thread(target=scheduler_analyze_and_notify, daemon=True)
 scheduler_thread.start()
-print("Scheduler notifications demarre (5 min interval)")
+print("Scheduler notifications demarre (15 min interval)")
 
 
 # ═══════════════════════════════════════════════
@@ -1835,7 +1836,7 @@ async def root():
     return {
         "status": "online",
         "message": "TradeVision AI - Multi-Users",
-        "version": "8.0.0",
+        "version": "8.1.0",
         "ai_provider": "OpenRouter",
         "ai_configured": bool(OPENROUTER_API_KEY),
         "active_model": ACTIVE_MODEL or "not_tested_yet",
@@ -1845,7 +1846,7 @@ async def root():
             "User Authentication (JWT)",
             "PostgreSQL Database",
             "Firebase Push Notifications",
-            "Auto Scheduler (5 min)",
+            "Auto Scheduler (15 min)",
             "Technical Analysis",
             "Smart Money Concepts",
             "Multi-Timeframes",
@@ -1875,19 +1876,16 @@ async def health():
 async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     """Créer un nouveau compte"""
     
-    # Validation
     if len(user_data.username) < 3:
         raise HTTPException(status_code=400, detail="Nom d'utilisateur trop court (min 3 caracteres)")
     
     if len(user_data.password) < 4:
         raise HTTPException(status_code=400, detail="Mot de passe trop court (min 4 caracteres)")
     
-    # Vérifier si username existe déjà
     existing = db.query(User).filter(User.username == user_data.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Ce nom d'utilisateur existe deja")
     
-    # Créer l'utilisateur
     hashed_pwd = hash_password(user_data.password)
     new_user = User(
         username=user_data.username,
@@ -1897,7 +1895,6 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_user)
     
-    # Créer le token JWT
     access_token = create_access_token(data={"sub": new_user.username})
     
     return {
@@ -1909,7 +1906,6 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    """Se connecter"""
     user = db.query(User).filter(User.username == form_data.username).first()
     
     if not user or not verify_password(form_data.password, user.password_hash):
@@ -1932,7 +1928,6 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
 
 @app.post("/api/v1/auth/login-simple", response_model=TokenResponse)
 async def login_simple(user_data: UserLogin, db: Session = Depends(get_db)):
-    """Login simple avec JSON (pour l'app Android)"""
     user = db.query(User).filter(User.username == user_data.username).first()
     
     if not user or not verify_password(user_data.password, user.password_hash):
@@ -1955,7 +1950,6 @@ async def login_simple(user_data: UserLogin, db: Session = Depends(get_db)):
 
 @app.get("/api/v1/auth/me")
 async def get_me(current_user: User = Depends(get_current_user)):
-    """Récupère les infos du user connecté"""
     return {
         "id": current_user.id,
         "username": current_user.username,
@@ -1982,7 +1976,6 @@ async def update_settings(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Met à jour les paramètres de l'utilisateur"""
     if settings.main_timeframe is not None:
         if settings.main_timeframe in TIMEFRAMES:
             current_user.main_timeframe = settings.main_timeframe
@@ -2027,7 +2020,6 @@ async def update_fcm_token(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Enregistre le FCM token pour recevoir les notifications"""
     current_user.fcm_token = token_data.fcm_token
     db.commit()
     return {"message": "FCM token enregistre avec succes"}
@@ -2038,7 +2030,6 @@ async def get_user_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Statistiques des notifications reçues par le user"""
     total = db.query(SignalNotification).filter(
         SignalNotification.user_id == current_user.id
     ).count()
@@ -2093,7 +2084,6 @@ async def get_signals(
     main_tf: str = "1h",
     confirmation_tf: str = None
 ):
-    """Signaux publics (pour compatibilité)"""
     signals = {}
     
     for asset in ASSETS.keys():
@@ -2146,7 +2136,6 @@ async def get_signals(
 
 @app.get("/api/v1/user/signals")
 async def get_user_signals(current_user: User = Depends(get_current_user)):
-    """Signaux personnalisés selon les paramètres de l'utilisateur"""
     main_tf = current_user.main_timeframe
     confirm_tf = current_user.confirmation_timeframe if not current_user.auto_confirmation else CONFIRMATION_MAP.get(main_tf, "4h")
     min_conf = current_user.min_confidence
@@ -2307,12 +2296,11 @@ async def get_calendar(currency: str = None, impact: str = None):
 
 
 # ═══════════════════════════════════════════════
-#              ADMIN (Debug)
+#              ADMIN
 # ═══════════════════════════════════════════════
 
 @app.get("/api/v1/admin/users-count")
 async def admin_users_count(db: Session = Depends(get_db)):
-    """Nombre d'utilisateurs (public pour debug)"""
     total = db.query(User).count()
     with_fcm = db.query(User).filter(User.fcm_token != "").count()
     notifs_enabled = db.query(User).filter(User.notifications_enabled == True).count()
@@ -2325,14 +2313,25 @@ async def admin_users_count(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/admin/test-notification")
 async def admin_test_notification(current_user: User = Depends(get_current_user)):
-    """Envoie une notification de test au user connecté"""
+    """Envoie une notification de test avec format ameliore"""
     if not current_user.fcm_token:
         raise HTTPException(status_code=400, detail="Aucun FCM token enregistre")
     
+    test_body = (
+        f"🐉 Bonjour {current_user.username} !\n\n"
+        f"💰 Prix actuel : 1.15353\n"
+        f"🎯 Entrée : 1.15353\n"
+        f"🛑 Stop Loss : 1.15235\n"
+        f"✅ TP1 : 1.15510\n"
+        f"✅ TP2 : 1.15589\n"
+        f"📊 R/R : 1:2.0  •  🟢 Risque LOW\n\n"
+        f"✨ Ta configuration fonctionne parfaitement !"
+    )
+    
     success = send_push_notification(
         current_user.fcm_token,
-        "🧪 Test TradeVision AI",
-        "Ceci est une notification de test. Si tu vois ça, tout fonctionne !",
+        "🧪 🟢 ACHAT EUR/USD  •  85% (TEST)",
+        test_body,
         {"type": "test"}
     )
     
