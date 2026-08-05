@@ -1753,10 +1753,10 @@ def send_signal_to_users(asset, signal_data):
 
 
 def scheduler_analyze_and_notify():
-    """Analyse continue toutes les 5 minutes et envoie notifications"""
+    """Analyse continue toutes les 15 minutes et envoie notifications"""
     while True:
         try:
-            time.sleep(300)  # 5 minutes
+            time.sleep(900)  # 15 minutes
             
             print(f"[{datetime.utcnow()}] Scheduler: analyse automatique...")
             
