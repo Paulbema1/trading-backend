@@ -5199,4 +5199,386 @@ async def api_compare_scores(asset: str = "EURUSD", tf: str = "1h", bars: int = 
         "timeframe": tf,
         **result
     }
+
+# ═══════════════════════════════════════════════
+#     PHASE 4 : ADMIN DASHBOARD SÉCURISÉ
+# ═══════════════════════════════════════════════
+
+ADMIN_PASSWORD = os.getenv("ADMIN_MASTER_PASSWORD", "")
+ADMIN_TOKEN_EXPIRE_HOURS = 4
+
+
+def create_admin_token(username: str):
+    """Crée un JWT admin avec expiration courte"""
+    expire = datetime.utcnow() + timedelta(hours=ADMIN_TOKEN_EXPIRE_HOURS)
+    data = {"sub": username, "role": "admin", "exp": expire}
+    return jwt.encode(data, JWT_SECRET, algorithm=ALGORITHM)
+
+
+def verify_admin_token(token: str):
+    """Vérifie un JWT admin"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        if payload.get("role") != "admin":
+            return None
+        return payload.get("sub")
+    except JWTError:
+        return None
+
+
+class AdminLogin(BaseModel):
+    password: str
+
+
+class AdminTokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+    expires_in_hours: int
+
+
+# ─── Auth Admin ───
+
+@app.post("/api/v2/admin/login")
+async def admin_login(login_data: AdminLogin):
+    """
+    Login administrateur
+    Le mot de passe est stocké dans ADMIN_MASTER_PASSWORD sur Render
+    JAMAIS dans le code ou l'APK
+    """
+    if not ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin non configure. Ajoutez ADMIN_MASTER_PASSWORD dans les variables Render."
+        )
+    
+    if login_data.password != ADMIN_PASSWORD:
+        # Log la tentative
+        print(f"[SECURITY] Tentative admin echouee depuis {datetime.utcnow()}")
+        raise HTTPException(
+            status_code=401,
+            detail="Mot de passe administrateur incorrect"
+        )
+    
+    token = create_admin_token("admin")
+    print(f"[SECURITY] Admin connecte a {datetime.utcnow()}")
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": "admin",
+        "expires_in_hours": ADMIN_TOKEN_EXPIRE_HOURS
+    }
+
+
+# ─── Dashboard Admin ───
+
+@app.get("/api/v2/admin/dashboard")
+async def admin_dashboard(admin_token: str = None, db: Session = Depends(get_db)):
+    """
+    Dashboard administrateur complet
+    Nécessite un token admin valide
+    """
+    if not admin_token:
+        raise HTTPException(status_code=401, detail="Token admin requis")
+    
+    admin_user = verify_admin_token(admin_token)
+    if not admin_user:
+        raise HTTPException(status_code=401, detail="Token admin invalide ou expire")
+    
+    # Users
+    total_users = db.query(User).count()
+    active_users = db.query(User).filter(User.is_active == True).count()
+    users_with_fcm = db.query(User).filter(User.fcm_token != "").count()
+    notifs_enabled = db.query(User).filter(User.notifications_enabled == True).count()
+    
+    # Signaux
+    total_signals = db.query(SignalV9).count()
+    buy_signals = db.query(SignalV9).filter(SignalV9.signal == "BUY").count()
+    sell_signals = db.query(SignalV9).filter(SignalV9.signal == "SELL").count()
+    active_signals = db.query(SignalV9).filter(SignalV9.status == "ACTIVE").count()
+    
+    # Résultats
+    all_results = db.query(SignalResultV9).all()
+    wins = sum(1 for r in all_results if r.result == "WIN")
+    losses = sum(1 for r in all_results if r.result == "LOSS")
+    total_closed = wins + losses
+    win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+    
+    pnl_values = [r.final_pnl_r for r in all_results if r.final_pnl_r is not None]
+    total_pnl = round(sum(pnl_values), 3) if pnl_values else 0
+    
+    gross_profit = sum(p for p in pnl_values if p > 0)
+    gross_loss = abs(sum(p for p in pnl_values if p < 0))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0
+    
+    # Notifications
+    total_notifs = db.query(SignalNotification).count()
+    today = datetime.utcnow().date()
+    today_start = datetime(today.year, today.month, today.day)
+    notifs_today = db.query(SignalNotification).filter(
+        SignalNotification.sent_at >= today_start
+    ).count()
+    
+    # API Status
+    api_status = {
+        "twelve_data": "configured" if API_KEY else "missing",
+        "twelve_data_key_2": "configured" if API_KEY_2 else "missing",
+        "openrouter": "configured" if OPENROUTER_API_KEY else "missing",
+        "firebase": "configured" if FIREBASE_APP else "missing",
+        "database": "connected",
+        "ai_model": ACTIVE_MODEL or "not_tested_yet",
+        "api_requests_counter": API_KEY_COUNTER
+    }
+    
+    # Derniers signaux
+    recent_signals = db.query(SignalV9).order_by(
+        SignalV9.timestamp.desc()
+    ).limit(10).all()
+    
+    recent_list = []
+    for sig in recent_signals:
+        recent_list.append({
+            "signal_id": sig.signal_id,
+            "timestamp": sig.timestamp.isoformat() if sig.timestamp else None,
+            "asset": sig.asset,
+            "signal": sig.signal,
+            "score": sig.score,
+            "classification": sig.classification,
+            "status": sig.status
+        })
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "admin_user": admin_user,
+        
+        "users": {
+            "total": total_users,
+            "active": active_users,
+            "with_fcm": users_with_fcm,
+            "notifications_enabled": notifs_enabled
+        },
+        
+        "signals": {
+            "total": total_signals,
+            "buy": buy_signals,
+            "sell": sell_signals,
+            "active": active_signals
+        },
+        
+        "performance": {
+            "wins": wins,
+            "losses": losses,
+            "total_closed": total_closed,
+            "win_rate": win_rate,
+            "total_pnl_r": total_pnl,
+            "profit_factor": profit_factor
+        },
+        
+        "notifications": {
+            "total_sent": total_notifs,
+            "sent_today": notifs_today
+        },
+        
+        "api_status": api_status,
+        
+        "recent_signals": recent_list,
+        
+        "system": {
+            "version": "9.0.0",
+            "scoring": "Deterministic 0-100",
+            "scheduler": "15 min interval",
+            "auto_ping": "5 min interval"
+        }
+    }
+
+
+# ─── Admin Signal Lab ───
+
+@app.get("/api/v2/admin/signal-lab")
+async def admin_signal_lab(
+    admin_token: str,
+    asset: str = "EURUSD",
+    tf: str = "1h",
+    min_score: int = 60
+):
+    """
+    Signal Lab : Analyse un actif en détail pour l'admin
+    """
+    admin_user = verify_admin_token(admin_token)
+    if not admin_user:
+        raise HTTPException(status_code=401, detail="Token admin invalide")
+    
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    # Signal v9.0 complet
+    signal = generate_signal_v9(asset, tf, min_score)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "admin_user": admin_user,
+        "mode": "signal_lab",
+        "signal_analysis": signal
+    }
+
+
+# ─── Admin Backtest Lab ───
+
+@app.get("/api/v2/admin/backtest-lab")
+async def admin_backtest_lab(
+    admin_token: str,
+    asset: str = "EURUSD",
+    tf: str = "1h",
+    bars: int = 300,
+    min_score: int = 60,
+    min_rr: float = 1.0
+):
+    """
+    Backtest Lab : Lance un backtest depuis l'admin
+    """
+    admin_user = verify_admin_token(admin_token)
+    if not admin_user:
+        raise HTTPException(status_code=401, detail="Token admin invalide")
+    
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if bars > 1000:
+        bars = 1000
+    
+    symbol = ASSETS[asset]
+    result = run_backtest(symbol, TIMEFRAMES.get(tf, "1h"), bars, min_score, min_rr)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "admin_user": admin_user,
+        "mode": "backtest_lab",
+        "asset": asset,
+        "timeframe": tf,
+        **result
+    }
+
+
+# ─── Admin Users List ───
+
+@app.get("/api/v2/admin/users")
+async def admin_users_list(admin_token: str, db: Session = Depends(get_db)):
+    """Liste tous les utilisateurs (admin uniquement)"""
+    admin_user = verify_admin_token(admin_token)
+    if not admin_user:
+        raise HTTPException(status_code=401, detail="Token admin invalide")
+    
+    users = db.query(User).all()
+    
+    users_list = []
+    for u in users:
+        # Compter les notifications
+        notif_count = db.query(SignalNotification).filter(
+            SignalNotification.user_id == u.id
+        ).count()
+        
+        users_list.append({
+            "id": u.id,
+            "username": u.username,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "is_active": u.is_active,
+            "is_admin": u.is_admin,
+            "main_timeframe": u.main_timeframe,
+            "min_confidence": u.min_confidence,
+            "notifications_enabled": u.notifications_enabled,
+            "has_fcm_token": bool(u.fcm_token),
+            "total_notifications": notif_count
+        })
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "admin_user": admin_user,
+        "total_users": len(users_list),
+        "users": users_list
+    }
+
+
+# ─── Admin System Status ───
+
+@app.get("/api/v2/admin/system")
+async def admin_system_status(admin_token: str):
+    """État complet du système"""
+    admin_user = verify_admin_token(admin_token)
+    if not admin_user:
+        raise HTTPException(status_code=401, detail="Token admin invalide")
+    
+    # Test Twelve Data
+    td_status = "unknown"
+    try:
+        test = td_request("price", {"symbol": "EUR/USD"})
+        td_status = "online" if test and "price" in test else "error"
+    except Exception:
+        td_status = "offline"
+    
+    # Test OpenRouter
+    or_status = "configured" if OPENROUTER_API_KEY else "not_configured"
+    
+    # Test Firebase
+    fb_status = "configured" if FIREBASE_APP else "not_configured"
+    
+    # News cache
+    news_status = "cached" if NEWS_CACHE["data"] else "empty"
+    news_age = int(time.time() - NEWS_CACHE["timestamp"]) if NEWS_CACHE["timestamp"] else 0
+    
+    # Calendar cache
+    cal_status = "cached" if CALENDAR_CACHE["data"] else "empty"
+    cal_age = int(time.time() - CALENDAR_CACHE["timestamp"]) if CALENDAR_CACHE["timestamp"] else 0
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "admin_user": admin_user,
+        "system": {
+            "version": "9.0.0",
+            "strategy_version": STRATEGY_VERSION,
+            "uptime": "active"
+        },
+        "services": {
+            "twelve_data": {
+                "status": td_status,
+                "key_1": bool(API_KEY),
+                "key_2": bool(API_KEY_2),
+                "requests_counter": API_KEY_COUNTER
+            },
+            "openrouter": {
+                "status": or_status,
+                "active_model": ACTIVE_MODEL or "not_tested"
+            },
+            "firebase": {
+                "status": fb_status
+            },
+            "database": {
+                "status": "connected"
+            }
+        },
+        "caches": {
+            "news": {
+                "status": news_status,
+                "age_seconds": news_age,
+                "items": len(NEWS_CACHE["data"]) if NEWS_CACHE["data"] else 0
+            },
+            "calendar": {
+                "status": cal_status,
+                "age_seconds": cal_age,
+                "items": len(CALENDAR_CACHE["data"]) if CALENDAR_CACHE["data"] else 0
+            },
+            "ai": {
+                "cached_analyses": len(AI_CACHE)
+            },
+            "historical": {
+                "cached_datasets": len(HISTORICAL_CACHE)
+            }
+        },
+        "scheduler": {
+            "interval": "15 min",
+            "status": "running"
+        }
+                            }
     
