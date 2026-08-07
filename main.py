@@ -3907,4 +3907,385 @@ async def admin_test_notification(current_user: User = Depends(get_current_user)
     if success:
         return {"message": "Notification v9.0 envoyee"}
     raise HTTPException(status_code=500, detail="Echec envoi")
+
+# ═══════════════════════════════════════════════
+#     PHASE 2 : PERFORMANCE & STATISTIQUES
+# ═══════════════════════════════════════════════
+
+@app.get("/api/v2/performance/by-asset")
+async def get_performance_by_asset(db: Session = Depends(get_db)):
+    """Performance separee par actif"""
+    results = {}
+    
+    for asset in ASSETS.keys():
+        signals = db.query(SignalV9).filter(
+            SignalV9.asset == asset,
+            SignalV9.signal.in_(["BUY", "SELL"])
+        ).all()
+        
+        signal_ids = [s.signal_id for s in signals]
+        
+        signal_results = db.query(SignalResultV9).filter(
+            SignalResultV9.signal_id.in_(signal_ids)
+        ).all() if signal_ids else []
+        
+        wins = sum(1 for r in signal_results if r.result == "WIN")
+        losses = sum(1 for r in signal_results if r.result == "LOSS")
+        total_closed = wins + losses
+        win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+        
+        pnl_values = [r.final_pnl_r for r in signal_results if r.final_pnl_r is not None]
+        avg_pnl = round(sum(pnl_values) / len(pnl_values), 3) if pnl_values else 0
+        
+        results[asset] = {
+            "total_signals": len(signals),
+            "wins": wins,
+            "losses": losses,
+            "pending": len(signals) - total_closed,
+            "win_rate": win_rate,
+            "average_pnl_r": avg_pnl,
+            "avg_score": round(sum(s.score for s in signals) / len(signals), 1) if signals else 0
+        }
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "by_asset": results,
+        "disclaimer": "Performances historiques. Ne garantissent pas les resultats futurs."
+    }
+
+
+@app.get("/api/v2/performance/by-timeframe")
+async def get_performance_by_timeframe(db: Session = Depends(get_db)):
+    """Performance separee par timeframe"""
+    results = {}
+    
+    for tf in TIMEFRAMES.keys():
+        signals = db.query(SignalV9).filter(
+            SignalV9.main_timeframe == tf,
+            SignalV9.signal.in_(["BUY", "SELL"])
+        ).all()
+        
+        signal_ids = [s.signal_id for s in signals]
+        
+        signal_results = db.query(SignalResultV9).filter(
+            SignalResultV9.signal_id.in_(signal_ids)
+        ).all() if signal_ids else []
+        
+        wins = sum(1 for r in signal_results if r.result == "WIN")
+        losses = sum(1 for r in signal_results if r.result == "LOSS")
+        total_closed = wins + losses
+        win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+        
+        results[tf] = {
+            "total_signals": len(signals),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate
+        }
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "by_timeframe": results
+    }
+
+
+@app.get("/api/v2/performance/by-score")
+async def get_performance_by_score(db: Session = Depends(get_db)):
+    """Performance separee par tranche de score"""
+    ranges = [
+        (60, 69, "MODERATE"),
+        (70, 79, "STRONG"),
+        (80, 89, "VERY_STRONG"),
+        (90, 100, "EXTREME")
+    ]
+    
+    results = {}
+    
+    for low, high, label in ranges:
+        signals = db.query(SignalV9).filter(
+            SignalV9.score >= low,
+            SignalV9.score <= high,
+            SignalV9.signal.in_(["BUY", "SELL"])
+        ).all()
+        
+        signal_ids = [s.signal_id for s in signals]
+        
+        signal_results = db.query(SignalResultV9).filter(
+            SignalResultV9.signal_id.in_(signal_ids)
+        ).all() if signal_ids else []
+        
+        wins = sum(1 for r in signal_results if r.result == "WIN")
+        losses = sum(1 for r in signal_results if r.result == "LOSS")
+        total_closed = wins + losses
+        win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+        
+        pnl_values = [r.final_pnl_r for r in signal_results if r.final_pnl_r is not None]
+        avg_pnl = round(sum(pnl_values) / len(pnl_values), 3) if pnl_values else 0
+        
+        gross_profit = sum(r.final_pnl_r for r in signal_results if r.final_pnl_r and r.final_pnl_r > 0)
+        gross_loss = abs(sum(r.final_pnl_r for r in signal_results if r.final_pnl_r and r.final_pnl_r < 0))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0
+        
+        results[f"{low}-{high} ({label})"] = {
+            "total_signals": len(signals),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "average_pnl_r": avg_pnl,
+            "profit_factor": profit_factor
+        }
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "by_score": results,
+        "note": "Permet de verifier si les scores eleves correspondent a de meilleurs resultats."
+    }
+
+
+@app.get("/api/v2/performance/by-direction")
+async def get_performance_by_direction(db: Session = Depends(get_db)):
+    """Performance separee par direction (BUY vs SELL)"""
+    results = {}
+    
+    for direction in ["BUY", "SELL"]:
+        signals = db.query(SignalV9).filter(
+            SignalV9.signal == direction
+        ).all()
+        
+        signal_ids = [s.signal_id for s in signals]
+        
+        signal_results = db.query(SignalResultV9).filter(
+            SignalResultV9.signal_id.in_(signal_ids)
+        ).all() if signal_ids else []
+        
+        wins = sum(1 for r in signal_results if r.result == "WIN")
+        losses = sum(1 for r in signal_results if r.result == "LOSS")
+        total_closed = wins + losses
+        win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+        
+        results[direction] = {
+            "total_signals": len(signals),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate
+        }
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "by_direction": results
+    }
+
+
+@app.get("/api/v2/signal-detail/{signal_id}")
+async def get_signal_detail(signal_id: str, db: Session = Depends(get_db)):
+    """Detail complet d'un signal enregistre"""
+    signal = db.query(SignalV9).filter(SignalV9.signal_id == signal_id).first()
+    
+    if not signal:
+        raise HTTPException(status_code=404, detail="Signal non trouve")
+    
+    result = db.query(SignalResultV9).filter(SignalResultV9.signal_id == signal_id).first()
+    
+    return {
+        "signal": {
+            "signal_id": signal.signal_id,
+            "strategy_version": signal.strategy_version,
+            "timestamp": signal.timestamp.isoformat() if signal.timestamp else None,
+            "asset": signal.asset,
+            "symbol": signal.symbol,
+            "main_timeframe": signal.main_timeframe,
+            "confirmation_timeframe": signal.confirmation_timeframe,
+            "higher_timeframe": signal.higher_timeframe,
+            "signal": signal.signal,
+            "score": signal.score,
+            "classification": signal.classification,
+            "scores_breakdown": json.loads(signal.scores_breakdown) if signal.scores_breakdown else {},
+            "entry": signal.entry,
+            "stop_loss": signal.stop_loss,
+            "take_profit_1": signal.take_profit_1,
+            "take_profit_2": signal.take_profit_2,
+            "take_profit_3": signal.take_profit_3,
+            "risk_reward": signal.risk_reward,
+            "market_regime": signal.market_regime,
+            "data_quality_status": signal.data_quality_status,
+            "reasons": json.loads(signal.reasons) if signal.reasons else [],
+            "warnings": json.loads(signal.warnings) if signal.warnings else [],
+            "ai_available": signal.ai_available,
+            "ai_summary": signal.ai_summary,
+            "current_price": signal.current_price,
+            "expiration": signal.expiration.isoformat() if signal.expiration else None,
+            "status": signal.status
+        },
+        "result": {
+            "result": result.result if result else "PENDING",
+            "tp1_hit": result.tp1_hit if result else False,
+            "tp2_hit": result.tp2_hit if result else False,
+            "tp3_hit": result.tp3_hit if result else False,
+            "sl_hit": result.sl_hit if result else False,
+            "final_price": result.final_price if result else None,
+            "final_pnl_r": result.final_pnl_r if result else None,
+            "checked_at": result.checked_at.isoformat() if result and result.checked_at else None
+        } if result else {"result": "PENDING"}
+    }
+
+
+@app.get("/api/v2/performance/summary")
+async def get_performance_summary(db: Session = Depends(get_db)):
+    """Resume complet des performances"""
+    
+    # Stats globales
+    total_signals = db.query(SignalV9).filter(SignalV9.signal.in_(["BUY", "SELL"])).count()
+    total_wait = db.query(SignalV9).filter(SignalV9.signal == "WAIT").count()
+    
+    all_results = db.query(SignalResultV9).all()
+    
+    wins = sum(1 for r in all_results if r.result == "WIN")
+    losses = sum(1 for r in all_results if r.result == "LOSS")
+    expired = sum(1 for r in all_results if r.result == "EXPIRED")
+    pending = sum(1 for r in all_results if r.result == "PENDING")
+    
+    total_closed = wins + losses
+    win_rate = round((wins / total_closed * 100), 2) if total_closed > 0 else 0
+    
+    pnl_values = [r.final_pnl_r for r in all_results if r.final_pnl_r is not None]
+    avg_pnl = round(sum(pnl_values) / len(pnl_values), 3) if pnl_values else 0
+    total_pnl = round(sum(pnl_values), 3) if pnl_values else 0
+    
+    # Profit Factor
+    gross_profit = sum(r.final_pnl_r for r in all_results if r.final_pnl_r and r.final_pnl_r > 0)
+    gross_loss = abs(sum(r.final_pnl_r for r in all_results if r.final_pnl_r and r.final_pnl_r < 0))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0
+    
+    # Max drawdown (simplifie)
+    running_pnl = 0
+    max_pnl = 0
+    max_dd = 0
+    for r in sorted(all_results, key=lambda x: x.checked_at or datetime.utcnow()):
+        if r.final_pnl_r:
+            running_pnl += r.final_pnl_r
+            if running_pnl > max_pnl:
+                max_pnl = running_pnl
+            dd = max_pnl - running_pnl
+            if dd > max_dd:
+                max_dd = dd
+    
+    # Consecutive wins/losses
+    max_win_streak = 0
+    max_loss_streak = 0
+    current_streak = 0
+    last_result = None
+    
+    for r in sorted(all_results, key=lambda x: x.checked_at or datetime.utcnow()):
+        if r.result == "WIN":
+            if last_result == "WIN":
+                current_streak += 1
+            else:
+                current_streak = 1
+            max_win_streak = max(max_win_streak, current_streak)
+        elif r.result == "LOSS":
+            if last_result == "LOSS":
+                current_streak += 1
+            else:
+                current_streak = 1
+            max_loss_streak = max(max_loss_streak, current_streak)
+        last_result = r.result
+    
+    # Score moyen des signaux
+    all_signals = db.query(SignalV9).filter(SignalV9.signal.in_(["BUY", "SELL"])).all()
+    avg_score = round(sum(s.score for s in all_signals) / len(all_signals), 1) if all_signals else 0
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "strategy_version": STRATEGY_VERSION,
+        "scoring_system": "Deterministic 0-100",
+        
+        "signals": {
+            "total_buy_sell": total_signals,
+            "total_wait": total_wait,
+            "average_score": avg_score
+        },
+        
+        "results": {
+            "wins": wins,
+            "losses": losses,
+            "expired": expired,
+            "pending": pending,
+            "total_closed": total_closed,
+            "win_rate": win_rate
+        },
+        
+        "financial": {
+            "total_pnl_r": total_pnl,
+            "average_pnl_r": avg_pnl,
+            "profit_factor": profit_factor,
+            "gross_profit_r": round(gross_profit, 3),
+            "gross_loss_r": round(gross_loss, 3)
+        },
+        
+        "risk": {
+            "max_drawdown_r": round(max_dd, 3),
+            "max_consecutive_wins": max_win_streak,
+            "max_consecutive_losses": max_loss_streak
+        },
+        
+        "disclaimer": "Performances historiques. Ne garantissent pas les resultats futurs."
+    }
+
+
+@app.get("/api/v2/active-signals")
+async def get_active_signals(db: Session = Depends(get_db)):
+    """Signaux actuellement actifs (non expires, non fermes)"""
+    active = db.query(SignalV9).filter(
+        SignalV9.status == "ACTIVE",
+        SignalV9.signal.in_(["BUY", "SELL"])
+    ).order_by(SignalV9.timestamp.desc()).all()
+    
+    results = []
+    for sig in active:
+        # Verifier prix actuel
+        current_price = None
+        try:
+            price_data = td_request("price", {"symbol": sig.symbol})
+            if price_data and "price" in price_data:
+                current_price = float(price_data["price"])
+        except Exception:
+            pass
+        
+        # Calculer PnL actuel
+        current_pnl_r = None
+        if current_price and sig.entry and sig.stop_loss:
+            risk = abs(sig.entry - sig.stop_loss)
+            if risk > 0:
+                if sig.signal == "BUY":
+                    pnl = current_price - sig.entry
+                else:
+                    pnl = sig.entry - current_price
+                current_pnl_r = round(pnl / risk, 2)
+        
+        results.append({
+            "signal_id": sig.signal_id,
+            "asset": sig.asset,
+            "signal": sig.signal,
+            "score": sig.score,
+            "classification": sig.classification,
+            "entry": sig.entry,
+            "stop_loss": sig.stop_loss,
+            "take_profit_1": sig.take_profit_1,
+            "risk_reward": sig.risk_reward,
+            "timestamp": sig.timestamp.isoformat() if sig.timestamp else None,
+            "expiration": sig.expiration.isoformat() if sig.expiration else None,
+            "current_price": current_price,
+            "current_pnl_r": current_pnl_r,
+            "status": "PROFIT" if current_pnl_r and current_pnl_r > 0 else ("LOSS" if current_pnl_r and current_pnl_r < 0 else "FLAT")
+        })
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "count": len(results),
+        "active_signals": results
+                                   }
     
