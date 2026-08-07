@@ -4288,4 +4288,915 @@ async def get_active_signals(db: Session = Depends(get_db)):
         "count": len(results),
         "active_signals": results
                                    }
+
+# ═══════════════════════════════════════════════
+#     PHASE 3 : BACKTEST ENGINE v9.0
+# ═══════════════════════════════════════════════
+
+# ─── Cache données historiques ───
+
+HISTORICAL_CACHE = {}
+HISTORICAL_CACHE_DURATION = 86400  # 24h en secondes
+
+
+def load_historical_data(symbol, interval, bars=500):
+    """
+    Charge les données historiques avec cache 24h
+    Réutilise get_candles_df() existant
+    """
+    cache_key = f"{symbol}_{interval}_{bars}"
+    now = time.time()
+    
+    # Vérifier le cache
+    if cache_key in HISTORICAL_CACHE:
+        cached = HISTORICAL_CACHE[cache_key]
+        if (now - cached["timestamp"]) < HISTORICAL_CACHE_DURATION:
+            return cached["data"]
+    
+    # Charger les données
+    df = get_candles_df(symbol, interval, limit=bars)
+    
+    if df is not None and len(df) > 0:
+        HISTORICAL_CACHE[cache_key] = {
+            "data": df,
+            "timestamp": now
+        }
+    
+    return df
+
+
+def backtest_calculate_score(df, idx, lookback=50):
+    """
+    Calcule le score pour une bougie spécifique du backtest
+    Utilise les données UNIQUEMENT disponibles à ce moment
+    (pas de look-ahead bias)
+    """
+    if idx < lookback:
+        return 0, "neutral", []
+    
+    # Slice des données jusqu'à idx (pas après)
+    df_slice = df.iloc[max(0, idx - lookback):idx + 1].copy()
+    
+    if len(df_slice) < 30:
+        return 0, "neutral", []
+    
+    close = df_slice["close"]
+    current_price = float(close.iloc[-1])
+    
+    # ─── Score Technique (0-25) ───
+    tech_score = 0
+    tech_dir = "neutral"
+    reasons = []
+    
+    # EMA
+    if len(close) >= 50:
+        ema_20_val = ema(close, 20).iloc[-1]
+        ema_50_val = ema(close, 50).iloc[-1]
+        
+        if current_price > ema_20_val > ema_50_val:
+            tech_score += 6
+            tech_dir = "bullish"
+            reasons.append("EMA bullish")
+        elif current_price < ema_20_val < ema_50_val:
+            tech_score += 6
+            tech_dir = "bearish"
+            reasons.append("EMA bearish")
+    
+    # RSI
+    if len(close) >= 14:
+        rsi_val = rsi(close, 14).iloc[-1]
+        if rsi_val < 30:
+            tech_score += 4
+            reasons.append("RSI survente")
+        elif rsi_val > 70:
+            tech_score += 4
+            reasons.append("RSI surachat")
+    
+    # MACD
+    if len(close) >= 26:
+        macd_line, signal_line, hist = macd(close)
+        macd_val = macd_line.iloc[-1]
+        macd_sig = signal_line.iloc[-1]
+        macd_hist = hist.iloc[-1]
+        
+        if macd_val > macd_sig and macd_hist > 0:
+            tech_score += 5
+            if tech_dir == "neutral":
+                tech_dir = "bullish"
+            reasons.append("MACD bullish")
+        elif macd_val < macd_sig and macd_hist < 0:
+            tech_score += 5
+            if tech_dir == "neutral":
+                tech_dir = "bearish"
+            reasons.append("MACD bearish")
+    
+    # Bollinger
+    if len(close) >= 20:
+        bb_upper, bb_mid, bb_lower = bollinger_bands(close)
+        if current_price < bb_lower.iloc[-1]:
+            tech_score += 3
+            reasons.append("Sous Bollinger")
+        elif current_price > bb_upper.iloc[-1]:
+            tech_score += 3
+            reasons.append("Au-dessus Bollinger")
+    
+    # ADX
+    if len(df_slice) >= 28:
+        try:
+            adx_val, plus_di_val, minus_di_val = adx(df_slice, 14)
+            current_adx = adx_val.iloc[-1]
+            if current_adx >= 25:
+                tech_score += 3
+                if plus_di_val.iloc[-1] > minus_di_val.iloc[-1]:
+                    reasons.append("ADX fort bullish")
+                else:
+                    reasons.append("ADX fort bearish")
+        except Exception:
+            pass
+    
+    # Stochastic
+    if len(df_slice) >= 14:
+        try:
+            stoch_k_val, stoch_d_val = stochastic(df_slice)
+            if stoch_k_val.iloc[-1] < 20:
+                tech_score += 2
+                reasons.append("Stoch survente")
+            elif stoch_k_val.iloc[-1] > 80:
+                tech_score += 2
+                reasons.append("Stoch surachat")
+        except Exception:
+            pass
+    
+    tech_score = min(tech_score, 25)
+    
+    # ─── Score SMC simplifié (0-30) ───
+    smc_score = 0
+    
+    # Structure de marché
+    try:
+        structure = analyze_market_structure(df_slice)
+        if structure["trend"] == "bullish":
+            smc_score += 6
+            reasons.append("Structure bullish")
+        elif structure["trend"] == "bearish":
+            smc_score += 6
+            reasons.append("Structure bearish")
+        
+        # BOS
+        bos_result = detect_bos(df_slice, structure)
+        if bos_result["detected"]:
+            smc_score += 6
+            reasons.append(f"BOS {bos_result['type']}")
+        
+        # CHOCH
+        choch_result = detect_choch(df_slice, structure)
+        if choch_result["detected"]:
+            smc_score += 8
+            reasons.append(f"CHOCH {choch_result['type']}")
+        
+        # Order Blocks
+        obs = detect_order_blocks(df_slice)
+        if obs["bullish"]:
+            smc_score += 4
+        if obs["bearish"]:
+            smc_score += 4
+        
+        # FVG
+        fvg_result = detect_fvg(df_slice)
+        if fvg_result["bullish"]:
+            smc_score += 2
+        if fvg_result["bearish"]:
+            smc_score += 2
+        
+        # Premium/Discount
+        pd_result = detect_premium_discount(df_slice)
+        if pd_result["zone"] == "discount":
+            smc_score += 3
+        elif pd_result["zone"] == "premium":
+            smc_score += 3
+        
+    except Exception:
+        pass
+    
+    smc_score = min(smc_score, 30)
+    
+    # ─── Scores supplémentaires ───
+    mtf_score = 10  # simplifié pour backtest
+    news_score = 5  # pas de news historiques
+    calendar_score = 5  # pas de calendrier historique
+    momentum_score = 3
+    context_score = 3
+    
+    # ─── Score final ───
+    total_score = min(
+        tech_score + smc_score + mtf_score + 
+        news_score + calendar_score + 
+        momentum_score + context_score,
+        100
+    )
+    
+    # Direction
+    direction = tech_dir
+    if smc_score > 15:
+        if structure.get("trend") == "bullish":
+            direction = "bullish"
+        elif structure.get("trend") == "bearish":
+            direction = "bearish"
+    
+    return total_score, direction, reasons
+
+
+def run_backtest(symbol, interval, bars=500, min_score=70, min_rr=1.5, train_pct=60, val_pct=20):
+    """
+    Execute un backtest complet avec Train/Validation/OOS
+    
+    Retourne les métriques pour chaque période
+    """
+    # Charger les données
+    df = load_historical_data(symbol, interval, bars)
+    
+    if df is None or len(df) < 100:
+        return {"error": "Donnees insuffisantes", "bars_available": len(df) if df is not None else 0}
+    
+    total_bars = len(df)
+    
+    # Séparer Train / Validation / OOS
+    train_end = int(total_bars * train_pct / 100)
+    val_end = int(total_bars * (train_pct + val_pct) / 100)
+    
+    periods = {
+        "train": (0, train_end),
+        "validation": (train_end, val_end),
+        "oos": (val_end, total_bars)
+    }
+    
+    results = {}
+    
+    for period_name, (start_idx, end_idx) in periods.items():
+        trades = simulate_period(df, start_idx, end_idx, min_score, min_rr)
+        metrics = calculate_backtest_metrics(trades)
+        
+        results[period_name] = {
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "bars": end_idx - start_idx,
+            "start_date": df.index[start_idx].isoformat() if start_idx < len(df) else None,
+            "end_date": df.index[min(end_idx - 1, len(df) - 1)].isoformat() if end_idx <= len(df) else None,
+            "trades": len(trades),
+            "metrics": metrics,
+            "trades_detail": trades[:20]  # Limiter pour la réponse
+        }
+    
+    # Recommendation
+    oos_metrics = results.get("oos", {}).get("metrics", {})
+    train_metrics = results.get("train", {}).get("metrics", {})
+    
+    recommendation = get_backtest_recommendation(train_metrics, oos_metrics)
+    
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "total_bars": total_bars,
+        "strategy_version": STRATEGY_VERSION,
+        "min_score": min_score,
+        "min_rr": min_rr,
+        "split": {
+            "train": f"{train_pct}%",
+            "validation": f"{val_pct}%",
+            "oos": f"{100 - train_pct - val_pct}%"
+        },
+        "results": results,
+        "recommendation": recommendation,
+        "disclaimer": "Performances historiques. Ne garantissent pas les resultats futurs."
+    }
+
+
+def simulate_period(df, start_idx, end_idx, min_score=70, min_rr=1.5):
+    """Simule les trades sur une période donnée"""
+    trades = []
+    
+    for i in range(max(start_idx, 50), min(end_idx, len(df) - 10)):
+        # Calculer le score à cette bougie
+        score, direction, reasons = backtest_calculate_score(df, i)
+        
+        if score < min_score:
+            continue
+        
+        if direction not in ["bullish", "bearish"]:
+            continue
+        
+        # Calculer SL/TP
+        current_price = float(df["close"].iloc[i])
+        atr_val_series = atr(df.iloc[max(0, i-30):i+1], 14)
+        
+        if atr_val_series.empty or pd.isna(atr_val_series.iloc[-1]):
+            continue
+        
+        atr_value = float(atr_val_series.iloc[-1])
+        
+        if atr_value <= 0:
+            continue
+        
+        supports_list = []
+        resistances_list = []
+        
+        entry, sl, tp1, tp2, tp3, rr = calculate_sl_tp_v9(
+            direction, current_price, atr_value, supports_list, resistances_list
+        )
+        
+        if entry is None or sl is None or tp1 is None:
+            continue
+        
+        # Vérifier R/R
+        rr_ok, _ = validate_risk_reward(rr, min_rr)
+        if not rr_ok:
+            continue
+        
+        # Simuler le résultat (regarder les bougies suivantes)
+        result = simulate_trade_result(df, i, direction, entry, sl, tp1, tp2, tp3)
+        
+        trades.append({
+            "bar_index": i,
+            "date": df.index[i].isoformat(),
+            "direction": "BUY" if direction == "bullish" else "SELL",
+            "score": score,
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "rr": rr,
+            "result": result["result"],
+            "pnl_r": result["pnl_r"],
+            "bars_held": result["bars_held"],
+            "exit_price": result["exit_price"],
+            "reasons": reasons[:3]
+        })
+    
+    return trades
+
+
+def simulate_trade_result(df, entry_idx, direction, entry, sl, tp1, tp2, tp3, max_bars=50):
+    """
+    Simule le résultat d'un trade en regardant les bougies suivantes
+    SANS look-ahead bias (on simule barre par barre)
+    """
+    result = {
+        "result": "EXPIRED",
+        "pnl_r": 0,
+        "bars_held": 0,
+        "exit_price": entry,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "sl_hit": False
+    }
+    
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return result
+    
+    for i in range(1, min(max_bars, len(df) - entry_idx)):
+        bar = df.iloc[entry_idx + i]
+        bar_high = float(bar["high"])
+        bar_low = float(bar["low"])
+        bar_close = float(bar["close"])
+        
+        result["bars_held"] = i
+        
+        if direction == "bullish":
+            # Vérifier SL d'abord
+            if bar_low <= sl:
+                result["result"] = "LOSS"
+                result["pnl_r"] = -1.0
+                result["exit_price"] = sl
+                result["sl_hit"] = True
+                return result
+            
+            # Vérifier TP1
+            if bar_high >= tp1:
+                result["result"] = "WIN"
+                pnl = tp1 - entry
+                result["pnl_r"] = round(pnl / risk, 2)
+                result["exit_price"] = tp1
+                result["tp1_hit"] = True
+                
+                # Vérifier TP2
+                if tp2 and bar_high >= tp2:
+                    pnl = tp2 - entry
+                    result["pnl_r"] = round(pnl / risk, 2)
+                    result["exit_price"] = tp2
+                    result["tp2_hit"] = True
+                
+                return result
+        
+        elif direction == "bearish":
+            if bar_high >= sl:
+                result["result"] = "LOSS"
+                result["pnl_r"] = -1.0
+                result["exit_price"] = sl
+                result["sl_hit"] = True
+                return result
+            
+            if bar_low <= tp1:
+                result["result"] = "WIN"
+                pnl = entry - tp1
+                result["pnl_r"] = round(pnl / risk, 2)
+                result["exit_price"] = tp1
+                result["tp1_hit"] = True
+                
+                if tp2 and bar_low <= tp2:
+                    pnl = entry - tp2
+                    result["pnl_r"] = round(pnl / risk, 2)
+                    result["exit_price"] = tp2
+                    result["tp2_hit"] = True
+                
+                return result
+    
+    # Expiré : fermer au prix actuel
+    last_close = float(df["close"].iloc[min(entry_idx + max_bars, len(df) - 1)])
+    if direction == "bullish":
+        pnl = last_close - entry
+    else:
+        pnl = entry - last_close
+    result["pnl_r"] = round(pnl / risk, 2)
+    result["exit_price"] = last_close
+    
+    return result
+
+def calculate_backtest_metrics(trades):
+    """Calcule toutes les métriques d'un backtest"""
+    if not trades:
+        return {
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "expired": 0,
+            "win_rate": 0,
+            "loss_rate": 0,
+            "profit_factor": 0,
+            "expectancy": 0,
+            "average_pnl_r": 0,
+            "average_win_r": 0,
+            "average_loss_r": 0,
+            "max_drawdown_r": 0,
+            "max_consecutive_wins": 0,
+            "max_consecutive_losses": 0,
+            "average_rr": 0,
+            "average_bars_held": 0,
+            "total_pnl_r": 0,
+            "largest_win_r": 0,
+            "largest_loss_r": 0,
+            "avg_score": 0
+        }
+    
+    wins = [t for t in trades if t["result"] == "WIN"]
+    losses = [t for t in trades if t["result"] == "LOSS"]
+    expired = [t for t in trades if t["result"] == "EXPIRED"]
+    
+    total = len(trades)
+    win_count = len(wins)
+    loss_count = len(losses)
+    total_closed = win_count + loss_count
+    
+    win_rate = round((win_count / total_closed * 100), 2) if total_closed > 0 else 0
+    loss_rate = round((loss_count / total_closed * 100), 2) if total_closed > 0 else 0
+    
+    # PnL
+    all_pnl = [t["pnl_r"] for t in trades if t.get("pnl_r") is not None]
+    total_pnl = round(sum(all_pnl), 3) if all_pnl else 0
+    avg_pnl = round(sum(all_pnl) / len(all_pnl), 3) if all_pnl else 0
+    
+    # Wins/Losses moyens
+    win_pnl = [t["pnl_r"] for t in wins if t.get("pnl_r") is not None]
+    loss_pnl = [t["pnl_r"] for t in losses if t.get("pnl_r") is not None]
+    
+    avg_win = round(sum(win_pnl) / len(win_pnl), 3) if win_pnl else 0
+    avg_loss = round(sum(loss_pnl) / len(loss_pnl), 3) if loss_pnl else 0
+    
+    largest_win = round(max(win_pnl), 3) if win_pnl else 0
+    largest_loss = round(min(loss_pnl), 3) if loss_pnl else 0
+    
+    # Profit Factor
+    gross_profit = sum(p for p in all_pnl if p > 0)
+    gross_loss = abs(sum(p for p in all_pnl if p < 0))
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0
+    
+    # Expectancy
+    if total_closed > 0:
+        expectancy = round(
+            (win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss), 3
+        )
+    else:
+        expectancy = 0
+    
+    # Max Drawdown
+    running_pnl = 0
+    max_pnl = 0
+    max_dd = 0
+    for t in trades:
+        pnl = t.get("pnl_r", 0)
+        running_pnl += pnl
+        if running_pnl > max_pnl:
+            max_pnl = running_pnl
+        dd = max_pnl - running_pnl
+        if dd > max_dd:
+            max_dd = dd
+    
+    # Consecutive wins/losses
+    max_win_streak = 0
+    max_loss_streak = 0
+    current_streak = 0
+    last_result = None
+    
+    for t in trades:
+        if t["result"] == "WIN":
+            if last_result == "WIN":
+                current_streak += 1
+            else:
+                current_streak = 1
+            max_win_streak = max(max_win_streak, current_streak)
+        elif t["result"] == "LOSS":
+            if last_result == "LOSS":
+                current_streak += 1
+            else:
+                current_streak = 1
+            max_loss_streak = max(max_loss_streak, current_streak)
+        last_result = t["result"]
+    
+    # R/R moyen
+    rr_values = [t.get("rr", 0) for t in trades if t.get("rr")]
+    avg_rr = round(sum(rr_values) / len(rr_values), 2) if rr_values else 0
+    
+    # Bars held moyen
+    bars_values = [t.get("bars_held", 0) for t in trades]
+    avg_bars = round(sum(bars_values) / len(bars_values), 1) if bars_values else 0
+    
+    # Score moyen
+    scores = [t.get("score", 0) for t in trades]
+    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+    
+    return {
+        "total_trades": total,
+        "wins": win_count,
+        "losses": loss_count,
+        "expired": len(expired),
+        "win_rate": win_rate,
+        "loss_rate": loss_rate,
+        "profit_factor": profit_factor,
+        "expectancy": expectancy,
+        "average_pnl_r": avg_pnl,
+        "average_win_r": avg_win,
+        "average_loss_r": avg_loss,
+        "max_drawdown_r": round(max_dd, 3),
+        "max_consecutive_wins": max_win_streak,
+        "max_consecutive_losses": max_loss_streak,
+        "average_rr": avg_rr,
+        "average_bars_held": avg_bars,
+        "total_pnl_r": total_pnl,
+        "largest_win_r": largest_win,
+        "largest_loss_r": largest_loss,
+        "avg_score": avg_score
+    }
+
+
+def get_backtest_recommendation(train_metrics, oos_metrics):
+    """Génère une recommandation basée sur Train vs OOS"""
+    if not train_metrics or not oos_metrics:
+        return {
+            "verdict": "INSUFFICIENT_DATA",
+            "message": "Pas assez de donnees pour une recommandation",
+            "robustness": 0
+        }
+    
+    train_wr = train_metrics.get("win_rate", 0)
+    oos_wr = oos_metrics.get("win_rate", 0)
+    train_pf = train_metrics.get("profit_factor", 0)
+    oos_pf = oos_metrics.get("profit_factor", 0)
+    train_trades = train_metrics.get("total_trades", 0)
+    oos_trades = oos_metrics.get("total_trades", 0)
+    oos_exp = oos_metrics.get("expectancy", 0)
+    oos_dd = oos_metrics.get("max_drawdown_r", 0)
+    
+    # Pas assez de trades
+    if train_trades < 5 or oos_trades < 3:
+        return {
+            "verdict": "INSUFFICIENT_DATA",
+            "message": f"Trop peu de trades (Train:{train_trades}, OOS:{oos_trades})",
+            "robustness": 0,
+            "details": {
+                "train_trades": train_trades,
+                "oos_trades": oos_trades
+            }
+        }
+    
+    # Calculer la robustesse
+    robustness = 0
+    warnings = []
+    positives = []
+    
+    # Win Rate OOS acceptable ?
+    if oos_wr >= 55:
+        robustness += 20
+        positives.append(f"Win Rate OOS bon ({oos_wr}%)")
+    elif oos_wr >= 45:
+        robustness += 10
+        warnings.append(f"Win Rate OOS moyen ({oos_wr}%)")
+    else:
+        warnings.append(f"Win Rate OOS faible ({oos_wr}%)")
+    
+    # Profit Factor OOS > 1 ?
+    if oos_pf > 1.5:
+        robustness += 25
+        positives.append(f"Profit Factor OOS excellent ({oos_pf})")
+    elif oos_pf > 1.0:
+        robustness += 15
+        positives.append(f"Profit Factor OOS positif ({oos_pf})")
+    else:
+        warnings.append(f"Profit Factor OOS negatif ({oos_pf})")
+    
+    # Expectancy positive ?
+    if oos_exp > 0.1:
+        robustness += 20
+        positives.append(f"Expectancy positive ({oos_exp}R)")
+    elif oos_exp > 0:
+        robustness += 10
+    else:
+        warnings.append(f"Expectancy negative ({oos_exp}R)")
+    
+    # Drawdown acceptable ?
+    if oos_dd < 3:
+        robustness += 15
+        positives.append(f"Drawdown faible ({oos_dd}R)")
+    elif oos_dd < 5:
+        robustness += 10
+    else:
+        warnings.append(f"Drawdown eleve ({oos_dd}R)")
+    
+    # Coherence Train vs OOS ?
+    if train_wr > 0 and oos_wr > 0:
+        degradation = ((train_wr - oos_wr) / train_wr) * 100
+        if degradation < 10:
+            robustness += 20
+            positives.append("Tres coherent Train/OOS")
+        elif degradation < 25:
+            robustness += 10
+            positives.append("Coherent Train/OOS")
+        else:
+            warnings.append(f"Degradation Train->OOS ({degradation:.0f}%)")
+            if degradation > 50:
+                warnings.append("POSSIBLE OVERFITTING")
+    
+    robustness = min(robustness, 100)
+    
+    # Verdict
+    if robustness >= 70 and oos_pf > 1.0 and oos_exp > 0:
+        verdict = "APPROVED"
+        message = "Strategie validee sur OOS - resultats coherents"
+    elif robustness >= 50:
+        verdict = "REVIEW"
+        message = "Resultats mitigés - necessité d'observer davantage"
+    elif robustness >= 30:
+        verdict = "CAUTION"
+        message = "Resultats faibles - ajustements recommandes"
+    else:
+        verdict = "REJECTED"
+        message = "Strategie non validee sur OOS"
+    
+    return {
+        "verdict": verdict,
+        "message": message,
+        "robustness": robustness,
+        "positives": positives,
+        "warnings": warnings,
+        "comparison": {
+            "train_win_rate": train_wr,
+            "oos_win_rate": oos_wr,
+            "train_profit_factor": train_pf,
+            "oos_profit_factor": oos_pf,
+            "train_trades": train_trades,
+            "oos_trades": oos_trades
+        }
+    }
+
+
+# ─── Walk-Forward simplifié ───
+
+def run_walk_forward(symbol, interval, bars=500, min_score=70, windows=3):
+    """
+    Walk-Forward Analysis simplifié
+    Découpe les données en fenêtres Train→Test glissantes
+    """
+    df = load_historical_data(symbol, interval, bars)
+    
+    if df is None or len(df) < 100:
+        return {"error": "Donnees insuffisantes"}
+    
+    total_bars = len(df)
+    window_size = total_bars // (windows + 1)
+    train_size = int(window_size * 0.7)
+    test_size = window_size - train_size
+    
+    results = []
+    
+    for w in range(windows):
+        start = w * window_size
+        train_end = start + train_size
+        test_end = train_end + test_size
+        
+        if test_end > total_bars:
+            break
+        
+        # Train
+        train_trades = simulate_period(df, start, train_end, min_score)
+        train_metrics = calculate_backtest_metrics(train_trades)
+        
+        # Test
+        test_trades = simulate_period(df, train_end, test_end, min_score)
+        test_metrics = calculate_backtest_metrics(test_trades)
+        
+        results.append({
+            "window": w + 1,
+            "train": {
+                "start": df.index[start].isoformat() if start < len(df) else None,
+                "end": df.index[min(train_end - 1, len(df) - 1)].isoformat(),
+                "bars": train_size,
+                "trades": train_metrics["total_trades"],
+                "win_rate": train_metrics["win_rate"],
+                "profit_factor": train_metrics["profit_factor"]
+            },
+            "test": {
+                "start": df.index[train_end].isoformat() if train_end < len(df) else None,
+                "end": df.index[min(test_end - 1, len(df) - 1)].isoformat(),
+                "bars": test_size,
+                "trades": test_metrics["total_trades"],
+                "win_rate": test_metrics["win_rate"],
+                "profit_factor": test_metrics["profit_factor"],
+                "expectancy": test_metrics["expectancy"],
+                "total_pnl_r": test_metrics["total_pnl_r"]
+            }
+        })
+    
+    # Stabilité
+    test_win_rates = [r["test"]["win_rate"] for r in results if r["test"]["trades"] > 0]
+    test_pfs = [r["test"]["profit_factor"] for r in results if r["test"]["trades"] > 0]
+    profitable_windows = sum(1 for r in results if r["test"].get("total_pnl_r", 0) > 0)
+    
+    avg_test_wr = round(sum(test_win_rates) / len(test_win_rates), 2) if test_win_rates else 0
+    avg_test_pf = round(sum(test_pfs) / len(test_pfs), 2) if test_pfs else 0
+    
+    stability = round((profitable_windows / len(results)) * 100, 1) if results else 0
+    
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "strategy_version": STRATEGY_VERSION,
+        "total_bars": total_bars,
+        "windows": len(results),
+        "min_score": min_score,
+        "window_results": results,
+        "summary": {
+            "average_test_win_rate": avg_test_wr,
+            "average_test_profit_factor": avg_test_pf,
+            "profitable_windows": profitable_windows,
+            "total_windows": len(results),
+            "stability_pct": stability
+        },
+        "verdict": "STABLE" if stability >= 60 else ("UNSTABLE" if stability < 40 else "MIXED"),
+        "disclaimer": "Walk-Forward ne garantit pas les performances futures."
+    }
+
+
+# ─── Compare scores ───
+
+def compare_score_thresholds(symbol, interval, bars=500):
+    """Compare les performances pour différents seuils de score"""
+    df = load_historical_data(symbol, interval, bars)
+    
+    if df is None or len(df) < 100:
+        return {"error": "Donnees insuffisantes"}
+    
+    thresholds = [40, 50, 60, 70, 80]
+    results = {}
+    
+    for threshold in thresholds:
+        trades = simulate_period(df, 50, len(df), threshold, min_rr=1.0)
+        metrics = calculate_backtest_metrics(trades)
+        
+        results[f"score_{threshold}+"] = {
+            "min_score": threshold,
+            "total_trades": metrics["total_trades"],
+            "win_rate": metrics["win_rate"],
+            "profit_factor": metrics["profit_factor"],
+            "expectancy": metrics["expectancy"],
+            "total_pnl_r": metrics["total_pnl_r"],
+            "max_drawdown_r": metrics["max_drawdown_r"],
+            "avg_score": metrics["avg_score"]
+        }
+    
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "strategy_version": STRATEGY_VERSION,
+        "total_bars": len(df),
+        "thresholds": results,
+        "note": "Compare les performances selon le seuil de score minimum.",
+        "disclaimer": "Performances historiques uniquement."
+    }
+
+
+# ═══════════════════════════════════════════════
+#     ENDPOINTS BACKTEST
+# ═══════════════════════════════════════════════
+
+@app.get("/api/v2/backtest/run")
+async def api_backtest_run(
+    asset: str = "EURUSD",
+    tf: str = "1h",
+    bars: int = 500,
+    min_score: int = 70,
+    min_rr: float = 1.5
+):
+    """
+    Backtest complet avec Train/Validation/OOS
+    ⚠️ Peut prendre 30-60 secondes
+    """
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if tf not in TIMEFRAMES:
+        raise HTTPException(status_code=400, detail="Invalid timeframe")
+    if bars > 1000:
+        bars = 1000
+    
+    symbol = ASSETS[asset]
+    result = run_backtest(symbol, TIMEFRAMES[tf], bars, min_score, min_rr)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": asset,
+        "timeframe": tf,
+        **result
+    }
+
+
+@app.get("/api/v2/backtest/quick")
+async def api_backtest_quick(asset: str = "EURUSD", tf: str = "1h"):
+    """Backtest rapide avec 200 barres"""
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    symbol = ASSETS[asset]
+    result = run_backtest(symbol, TIMEFRAMES.get(tf, "1h"), bars=200, min_score=60, min_rr=1.0)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": asset,
+        "timeframe": tf,
+        "mode": "quick",
+        **result
+    }
+
+
+@app.get("/api/v2/backtest/walk-forward")
+async def api_walk_forward(
+    asset: str = "EURUSD",
+    tf: str = "1h",
+    bars: int = 500,
+    min_score: int = 70,
+    windows: int = 3
+):
+    """Walk-Forward Analysis"""
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if windows > 5:
+        windows = 5
+    
+    symbol = ASSETS[asset]
+    result = run_walk_forward(symbol, TIMEFRAMES.get(tf, "1h"), bars, min_score, windows)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": asset,
+        "timeframe": tf,
+        **result
+    }
+
+
+@app.get("/api/v2/backtest/compare-scores")
+async def api_compare_scores(asset: str = "EURUSD", tf: str = "1h", bars: int = 500):
+    """Compare les performances pour différents seuils de score"""
+    asset = asset.upper()
+    if asset not in ASSETS:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    
+    symbol = ASSETS[asset]
+    result = compare_score_thresholds(symbol, TIMEFRAMES.get(tf, "1h"), bars)
+    
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": asset,
+        "timeframe": tf,
+        **result
+    }
     
