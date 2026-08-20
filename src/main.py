@@ -4,6 +4,8 @@ TradeVision AI - Point d'entrée principal de l'application.
 Version : 9.0.0
 """
 
+import asyncio
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,13 +27,31 @@ from src.api.v1.routes import router as legacy_router
 
 logger = get_logger(__name__)
 
+# Tâche pour stocker la boucle keep-alive
+_keep_alive_task = None
+
+
+async def keep_alive_task():
+    """Ping automatiquement Render toutes les 10 minutes pour éviter la mise en veille."""
+    while True:
+        try:
+            await asyncio.sleep(600)  # Attente de 10 minutes
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Appel sur le port local pour stimuler l'activité
+                await client.get("http://127.0.0.1:10000/health")
+            logger.debug("🔄 Anti-veille : Auto-ping exécuté avec succès.")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"⚠️ Anti-veille : Échec de l'auto-ping ({e})")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Cycle de vie de l'application : Démarrage et Extinction."""
     logger.info(f"=== Démarrage de {APP_NAME} v{APP_VERSION} ===")
 
-    # Initialisation de la base de données (création des tables si absentes)
+    # Initialisation de la base de données
     try:
         init_db()
         logger.info("Base de données initialisée avec succès.")
@@ -44,8 +64,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Erreur initialisation Firebase : {e}")
 
+    # Démarrage de la boucle anti-veille Render
+    global _keep_alive_task
+    _keep_alive_task = asyncio.create_task(keep_alive_task())
+
     yield
 
+    # Arrêt propre de l'anti-veille
+    if _keep_alive_task:
+        _keep_alive_task.cancel()
     logger.info(f"=== Arrêt de {APP_NAME} ===")
 
 

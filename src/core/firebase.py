@@ -2,9 +2,6 @@
 Firebase Cloud Messaging (FCM).
 
 Envoie des notifications push aux appareils des utilisateurs.
-
-Le FCM Token est stocké en base de données, pas le numéro
-de téléphone ni l'email.
 """
 
 import logging
@@ -27,12 +24,7 @@ _firebase_initialized = False
 
 
 def init_firebase():
-    """
-    Initialise Firebase Admin SDK.
-
-    Ne fait rien si les credentials ne sont pas configurés
-    (mode dev local sans Firebase).
-    """
+    """Initialise Firebase Admin SDK."""
     global _firebase_initialized
 
     if _firebase_initialized:
@@ -49,8 +41,14 @@ def init_firebase():
         cred = credentials.Certificate({
             "type": "service_account",
             "project_id": FIREBASE_PROJECT_ID,
-            "client_email": FIREBASE_CLIENT_EMAIL,
+            "private_key_id": "tradevision-key",
             "private_key": FIREBASE_PRIVATE_KEY,
+            "client_email": FIREBASE_CLIENT_EMAIL,
+            "client_id": "tradevision-client",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{FIREBASE_CLIENT_EMAIL.replace('@', '%40')}"
         })
         firebase_admin.initialize_app(cred)
         _firebase_initialized = True
@@ -67,21 +65,13 @@ def send_notification_to_token(
     body: str,
     data: Optional[dict] = None,
 ) -> bool:
-    """
-    Envoie une notification à UN seul appareil.
-
-    Retourne True si succès, False sinon.
-    """
     if not _firebase_initialized:
         logger.debug(f"[DEV] Notification simulée → {title}: {body}")
         return False
 
     try:
         message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
+            notification=messaging.Notification(title=title, body=body),
             data=data or {},
             token=token,
         )
@@ -98,17 +88,8 @@ def send_notification_to_many(
     body: str,
     data: Optional[dict] = None,
 ) -> dict:
-    """
-    Envoie une notification à PLUSIEURS appareils (multicast).
-
-    Retourne un résumé :
-        {"success": 45, "failure": 2, "invalid_tokens": [...]}
-    """
     if not _firebase_initialized:
-        logger.debug(
-            f"[DEV] Notification multicast simulée "
-            f"→ {len(tokens)} appareils | {title}"
-        )
+        logger.debug(f"[DEV] Notification multicast simulée → {len(tokens)} appareils | {title}")
         return {"success": 0, "failure": 0, "invalid_tokens": []}
 
     if not tokens:
@@ -116,10 +97,7 @@ def send_notification_to_many(
 
     try:
         message = messaging.MulticastMessage(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
+            notification=messaging.Notification(title=title, body=body),
             data=data or {},
             tokens=tokens,
         )
