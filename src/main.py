@@ -16,10 +16,19 @@ from src.core.config import (
     API_TITLE,
     API_DESCRIPTION,
     CORS_ORIGINS,
+    SUPPORTED_ASSETS,
+    MAIN_TIMEFRAME,
+    CONFIRMATION_TIMEFRAME,
+    DEFAULT_REFRESH_INTERVAL,
 )
-from src.core.database import init_db
+from src.core.database import init_db, SessionLocal
 from src.core.firebase import init_firebase
 from src.core.logging import get_logger
+from src.engine.signal_engine import signal_engine
+from src.services.notifications import notification_service
+from src.models.signal import Signal
+import json
+
 from src.api.v2.auth import router as auth_router
 from src.api.v2.signals import router as signals_router
 from src.api.v2.admin import router as admin_router
@@ -27,56 +36,120 @@ from src.api.v1.routes import router as legacy_router
 
 logger = get_logger(__name__)
 
-# Tâche pour stocker la boucle keep-alive
 _keep_alive_task = None
+_auto_scan_task = None
 
 
 async def keep_alive_task():
     """Ping automatiquement Render toutes les 10 minutes pour éviter la mise en veille."""
     while True:
         try:
-            await asyncio.sleep(600)  # Attente de 10 minutes
+            await asyncio.sleep(600)  # 10 minutes
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # Appel sur le port local pour stimuler l'activité
                 await client.get("http://127.0.0.1:10000/health")
-            logger.debug("🔄 Anti-veille : Auto-ping exécuté avec succès.")
+            logger.debug("🔄 Anti-veille : Auto-ping exécuté.")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.debug(f"⚠️ Anti-veille : Échec de l'auto-ping ({e})")
+            logger.debug(f"⚠️ Anti-veille : {e}")
+
+
+async def auto_scan_task():
+    """
+    TÂCHE AUTONOME 24H/24 :
+    Scanne automatiquement tous les marchés à intervalle régulier.
+    """
+    # Attente initiale de 30 secondes au démarrage du serveur
+    await asyncio.sleep(30)
+    
+    scan_interval_seconds = DEFAULT_REFRESH_INTERVAL * 60  # ex: 15 minutes (900s)
+    logger.info(f"🤖 Moteur Autonome activé : Scan automatique toutes les {DEFAULT_REFRESH_INTERVAL} minutes.")
+
+    while True:
+        try:
+            logger.info("🤖 Auto-Scan : Analyse automatique de tous les marchés...")
+            db = SessionLocal()
+            try:
+                for symbol in SUPPORTED_ASSETS:
+                    signal = await signal_engine.generate_signal(
+                        symbol=symbol,
+                        main_tf=MAIN_TIMEFRAME,
+                        confirm_tf=CONFIRMATION_TIMEFRAME,
+                    )
+
+                    # Sauvegarde en base de données
+                    db_signal = Signal(
+                        symbol=signal.symbol,
+                        action=signal.action.value,
+                        score=signal.score,
+                        confidence=signal.confidence,
+                        entry_price=signal.entry_price,
+                        stop_loss=signal.stop_loss,
+                        take_profit_1=signal.take_profit_1,
+                        take_profit_2=signal.take_profit_2,
+                        take_profit_3=signal.take_profit_3,
+                        risk_reward=signal.risk_reward,
+                        main_timeframe=signal.main_timeframe,
+                        confirmation_timeframe=signal.confirmation_timeframe,
+                        score_breakdown=json.dumps(signal.score_breakdown) if signal.score_breakdown else None,
+                        news_used=signal.news_used,
+                        news_status=signal.news_status.value if signal.news_status else None,
+                        news_summary=signal.news_summary,
+                        data_quality=signal.data_quality.value,
+                        ai_confirmed=signal.ai_confirmed,
+                        reasons=signal.reasons,
+                    )
+                    db.add(db_signal)
+                    db.commit()
+
+                    # Si signal BUY ou SELL valide -> Notification Push Firebase automatique !
+                    if signal.action.value in ("BUY", "SELL"):
+                        logger.info(f"🚨 SIGNAL AUTOMATIQUE DÉTECTÉ : {signal.action.value} {symbol} ({signal.confidence}%)")
+                        await notification_service.broadcast_signal(signal, db)
+
+            finally:
+                db.close()
+
+            logger.info(f"🤖 Auto-Scan terminé. Prochain scan dans {DEFAULT_REFRESH_INTERVAL} minutes.")
+            await asyncio.sleep(scan_interval_seconds)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Erreur Auto-Scan : {e}")
+            await asyncio.sleep(60)  # Pause de sécurité en cas d'erreur
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Cycle de vie de l'application : Démarrage et Extinction."""
+    """Cycle de vie de l'application."""
     logger.info(f"=== Démarrage de {APP_NAME} v{APP_VERSION} ===")
 
-    # Initialisation de la base de données
     try:
         init_db()
         logger.info("Base de données initialisée avec succès.")
     except Exception as e:
-        logger.error(f"Erreur initialisation base de données : {e}")
+        logger.error(f"Erreur initialisation DB : {e}")
 
-    # Initialisation Firebase Cloud Messaging
     try:
         init_firebase()
     except Exception as e:
         logger.error(f"Erreur initialisation Firebase : {e}")
 
-    # Démarrage de la boucle anti-veille Render
-    global _keep_alive_task
+    # Lancement des deux tâches de fond (Anti-veille + Auto-Scanner 24h/24)
+    global _keep_alive_task, _auto_scan_task
     _keep_alive_task = asyncio.create_task(keep_alive_task())
+    _auto_scan_task = asyncio.create_task(auto_scan_task())
 
     yield
 
-    # Arrêt propre de l'anti-veille
     if _keep_alive_task:
         _keep_alive_task.cancel()
+    if _auto_scan_task:
+        _auto_scan_task.cancel()
     logger.info(f"=== Arrêt de {APP_NAME} ===")
 
 
-# Création de l'application FastAPI
 app = FastAPI(
     title=API_TITLE,
     version=APP_VERSION,
@@ -84,7 +157,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Configuration CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -93,7 +165,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inclusion des routeurs d'API
 app.include_router(auth_router, prefix="/api/v2")
 app.include_router(signals_router, prefix="/api/v2")
 app.include_router(admin_router, prefix="/api/v2")
@@ -102,15 +173,14 @@ app.include_router(legacy_router, prefix="/api")
 
 @app.get("/", tags=["Santé"])
 def root():
-    """Vérification rapide de l'état de l'API."""
     return {
         "app": APP_NAME,
         "version": APP_VERSION,
         "status": "ONLINE",
+        "autonomous_engine": "ACTIVE",
     }
 
 
 @app.get("/health", tags=["Santé"])
 def health():
-    """Endpoint de monitoring pour Render / Kubernetes / Cloud."""
     return {"status": "HEALTHY"}
