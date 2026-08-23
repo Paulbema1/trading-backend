@@ -1,58 +1,27 @@
-"""
-Connexion à la base de données via SQLAlchemy.
-
-Supporte :
-- SQLite (local / dev)
-- PostgreSQL (Render / production)
-
-Met à jour automatiquement le schéma de la base de données (auto-migration).
-"""
-
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
-
 from src.core.config import DATABASE_URL
 
-# SQLite nécessite check_same_thread=False
 connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    connect_args["check_same_thread"] = False
+if DATABASE_URL.startswith('sqlite'):
+    connect_args['check_same_thread'] = False
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-)
-
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine,
-)
-
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
 def get_db():
-    """Dépendance FastAPI."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-
 def init_db():
-    """
-    Crée toutes les tables et s'assure que la structure PostgreSQL est à jour.
-    """
     Base.metadata.create_all(bind=engine)
-
-    # Auto-migration PostgreSQL pour ajouter les colonnes manquantes
-    if not DATABASE_URL.startswith("sqlite"):
+    if not DATABASE_URL.startswith('sqlite'):
         try:
             with engine.connect() as conn:
-                # Table Users
                 conn.execute(text("""
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(10) DEFAULT 'USER';
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500);
@@ -60,10 +29,6 @@ def init_db():
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT TRUE;
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_assets VARCHAR(200) DEFAULT 'EUR/USD,GBP/USD,USD/JPY,XAU/USD';
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-                """))
-
-                # Table Signals
-                conn.execute(text("""
                     ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_price DOUBLE PRECISION;
                     ALTER TABLE signals ADD COLUMN IF NOT EXISTS stop_loss DOUBLE PRECISION;
                     ALTER TABLE signals ADD COLUMN IF NOT EXISTS take_profit_1 DOUBLE PRECISION;
@@ -84,4 +49,4 @@ def init_db():
                 """))
                 conn.commit()
         except Exception as e:
-            print(f"Note migration PostgreSQL : {e}")
+            print(f'Note migration PostgreSQL : {e}')
