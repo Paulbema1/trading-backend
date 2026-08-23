@@ -120,14 +120,14 @@ class BacktestEngine:
                 + momentum_res["score"]
                 + regime_res["score"]
             )
-            total_score = max(0, min(100, total_score))
+            total_score = int(max(0, min(100, total_score)))
 
             if (
                 total_score >= min_confidence
                 and candidate_action != ActionEnum.WAIT
                 and news_reaction["status"] != NewsStatusEnum.DIVERGENCE
             ):
-                atr = ta_res["indicators"].get("atr", current_price * 0.001)
+                atr = float(ta_res["indicators"].get("atr", current_price * 0.001))
                 sl_dist = max(atr * 1.5, current_price * 0.0015)
 
                 if candidate_action == ActionEnum.BUY:
@@ -155,12 +155,17 @@ class BacktestEngine:
 
                 executed_trades.append({
                     "entry_time": str(current_time),
-                    "symbol": clean_symbol,
-                    "action": candidate_action.value,
-                    "score": total_score,
-                    "entry_price": round(current_price, 5),
-                    "news_used": news_reaction["news_used"],
-                    **trade_result,
+                    "symbol": str(clean_symbol),
+                    "action": str(candidate_action.value),
+                    "score": int(total_score),
+                    "entry_price": float(round(current_price, 5)),
+                    "news_used": bool(news_reaction["news_used"]),
+                    "result": str(trade_result.get("result", "OPEN")),
+                    "exit_price": float(trade_result.get("exit_price", current_price)),
+                    "exit_time": str(trade_result.get("exit_time", "")),
+                    "pips": float(trade_result.get("pips", 0.0)),
+                    "hit_tp": int(trade_result.get("hit_tp", 0)),
+                    "r_multiple": float(trade_result.get("r_multiple", 0.0)),
                 })
                 i += 4
             else:
@@ -168,8 +173,8 @@ class BacktestEngine:
 
         metrics = BacktestResults.calculate_metrics(executed_trades)
         return {
-            "symbol": clean_symbol,
-            "main_tf": main_tf,
+            "symbol": str(clean_symbol),
+            "main_tf": str(main_tf),
             "period": f"{main_df['datetime'].iloc[0]} -> {main_df['datetime'].iloc[-1]}",
             "metrics": metrics,
             "trades": executed_trades,

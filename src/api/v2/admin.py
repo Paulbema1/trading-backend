@@ -3,7 +3,7 @@ TradeVision AI - Espace Admin & Cockpit de Contrôle (v2).
 """
 
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
@@ -27,7 +27,6 @@ def list_users(
     db: Session = Depends(get_db),
 ):
     users = db.query(User).order_by(User.created_at.desc()).all()
-
     result = []
     for u in users:
         result.append(AdminUserListItem(
@@ -84,7 +83,7 @@ async def trigger_full_market_scan(
 
 
 @router.post("/backtest", status_code=status.HTTP_200_OK)
-def run_backtest_route(
+async def run_backtest_route(
     symbol: str = Query(default="EUR/USD"),
     main_tf: str = Query(default="1h"),
     confirm_tf: str = Query(default="4h"),
@@ -92,13 +91,19 @@ def run_backtest_route(
     end_date: Optional[str] = Query(default=None),
     admin: User = Depends(require_admin),
 ):
-    """Exécute une simulation de backtest sur les données historiques."""
-    from src.backtest.engine import backtest_engine
-    res = backtest_engine.run_backtest(
-        symbol=symbol,
-        main_tf=main_tf,
-        confirm_tf=confirm_tf,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    return res
+    try:
+        from src.backtest.engine import backtest_engine
+        res = await backtest_engine.run_backtest(
+            symbol=symbol,
+            main_tf=main_tf,
+            confirm_tf=confirm_tf,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return res
+    except Exception as e:
+        logger.error(f"Erreur Backtest : {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur calcul backtest : {str(e)}"
+        )
