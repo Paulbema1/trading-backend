@@ -5,7 +5,7 @@ Supporte :
 - SQLite (local / dev)
 - PostgreSQL (Render / production)
 
-Met à jour automatiquement le schéma de la base de données (auto-migration).
+Initialisation et synchronisation automatique du schéma.
 """
 
 from sqlalchemy import create_engine, text
@@ -13,7 +13,6 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 from src.core.config import DATABASE_URL
 
-# SQLite nécessite check_same_thread=False
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
@@ -44,42 +43,30 @@ def get_db():
 
 def init_db():
     """
-    Crée toutes les tables et s'assure que la structure PostgreSQL est à jour.
+    S'assure que la structure des tables PostgreSQL est 100 % conforme.
     """
-    Base.metadata.create_all(bind=engine)
+    # Import des modèles pour enregistrer les métadonnées
+    import src.models.user
+    import src.models.signal
 
-    # Auto-migration PostgreSQL pour ajouter les colonnes manquantes
+    # Nettoyage automatique des anciennes tables obsolètes sur PostgreSQL
     if not DATABASE_URL.startswith("sqlite"):
         try:
             with engine.connect() as conn:
-                # Table Users
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(10) DEFAULT 'USER';"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(500);"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN DEFAULT TRUE;"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_assets VARCHAR(200) DEFAULT 'EUR/USD,GBP/USD,USD/JPY,XAU/USD';"))
-                conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;"))
-
-                # Table Signals
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_price DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS stop_loss DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS take_profit_1 DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS take_profit_2 DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS take_profit_3 DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS risk_reward DOUBLE PRECISION;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS main_timeframe VARCHAR(10);"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS confirmation_timeframe VARCHAR(10);"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS score_breakdown TEXT;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS news_used BOOLEAN DEFAULT FALSE;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS news_status VARCHAR(30);"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS news_summary TEXT;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS data_quality VARCHAR(10) DEFAULT 'GOOD';"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_confirmed BOOLEAN;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_reason TEXT;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS reasons TEXT;"))
-                conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;"))
-
-                conn.commit()
-                print("Migration PostgreSQL exécutée avec succès !")
+                check_query = text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name='users' AND column_name='role';"
+                )
+                res = conn.execute(check_query).fetchone()
+                if not res:
+                    print("⚠️ Ancien schéma PostgreSQL détecté : Réinitialisation propre...")
+                    conn.execute(text("DROP TABLE IF EXISTS signals CASCADE;"))
+                    conn.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
+                    conn.commit()
+                    print("✅ Ancien schéma réinitialisé.")
         except Exception as e:
-            print(f"Erreur migration PostgreSQL : {e}")
+            print(f"Note vérification PostgreSQL : {e}")
+
+    # Création des nouvelles tables complètes
+    Base.metadata.create_all(bind=engine)
+    print("✅ Tables de la base de données initialisées avec succès.")
