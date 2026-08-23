@@ -1,8 +1,8 @@
 """
-TradeVision AI - Simulateur d'Exécution de Trades.
+TradeVision AI - Simulateur d'Exécution de Trades (Backtest).
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import pandas as pd
 from src.schemas.signal import ActionEnum
 
@@ -24,72 +24,65 @@ class TradeSimulator:
         take_profit_3: float,
         future_candles: pd.DataFrame,
     ) -> Dict[str, Any]:
-        """
-        Parcourt les bougies futures pour vérifier l'issue du trade.
-        """
-        pip_unit = 0.01 if "JPY" in symbol else 0.0001
+        pip_unit = 0.01 if "JPY" in symbol else (0.1 if "XAU" in symbol else 0.0001)
         spread_cost = self.spread_pips * pip_unit
 
-        # Ajustement du prix d'entrée avec le spread
         actual_entry = entry_price + (spread_cost if action == ActionEnum.BUY else -spread_cost)
 
         for idx, row in future_candles.iterrows():
-            high = row["high"]
-            low = row["low"]
-            candle_time = row["datetime"]
+            high = float(row["high"])
+            low = float(row["low"])
+            candle_time_str = str(row["datetime"])
 
-            # ── Trade BUY ──────────────────────────────────────────
+            # ── BUY ────────────────────────────────────────────────
             if action == ActionEnum.BUY:
-                # 1. Vérification SL
                 if low <= stop_loss:
                     loss_pips = (actual_entry - stop_loss) / pip_unit
                     return {
                         "result": "LOSS",
-                        "exit_price": stop_loss,
-                        "exit_time": candle_time,
-                        "pips": -loss_pips,
+                        "exit_price": round(stop_loss, 5),
+                        "exit_time": candle_time_str,
+                        "pips": -round(loss_pips, 1),
                         "hit_tp": 0,
                         "r_multiple": -1.0,
                     }
-                # 2. Vérification TPs
                 if high >= take_profit_3:
                     gain_pips = (take_profit_3 - actual_entry) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_3, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 3, "r_multiple": 3.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_3, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 3, "r_multiple": 3.5}
                 if high >= take_profit_2:
                     gain_pips = (take_profit_2 - actual_entry) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_2, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 2, "r_multiple": 2.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_2, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 2, "r_multiple": 2.5}
                 if high >= take_profit_1:
                     gain_pips = (take_profit_1 - actual_entry) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_1, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 1, "r_multiple": 1.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_1, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 1, "r_multiple": 1.5}
 
-            # ── Trade SELL ─────────────────────────────────────────
+            # ── SELL ───────────────────────────────────────────────
             elif action == ActionEnum.SELL:
-                # 1. Vérification SL
                 if high >= stop_loss:
                     loss_pips = (stop_loss - actual_entry) / pip_unit
                     return {
                         "result": "LOSS",
-                        "exit_price": stop_loss,
-                        "exit_time": candle_time,
-                        "pips": -loss_pips,
+                        "exit_price": round(stop_loss, 5),
+                        "exit_time": candle_time_str,
+                        "pips": -round(loss_pips, 1),
                         "hit_tp": 0,
                         "r_multiple": -1.0,
                     }
-                # 2. Vérification TPs
                 if low <= take_profit_3:
                     gain_pips = (actual_entry - take_profit_3) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_3, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 3, "r_multiple": 3.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_3, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 3, "r_multiple": 3.5}
                 if low <= take_profit_2:
                     gain_pips = (actual_entry - take_profit_2) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_2, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 2, "r_multiple": 2.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_2, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 2, "r_multiple": 2.5}
                 if low <= take_profit_1:
                     gain_pips = (actual_entry - take_profit_1) / pip_unit
-                    return {"result": "WIN", "exit_price": take_profit_1, "exit_time": candle_time, "pips": gain_pips, "hit_tp": 1, "r_multiple": 1.5}
+                    return {"result": "WIN", "exit_price": round(take_profit_1, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 1, "r_multiple": 1.5}
 
+        last_close = float(future_candles["close"].iloc[-1]) if not future_candles.empty else actual_entry
         return {
             "result": "OPEN",
-            "exit_price": future_candles["close"].iloc[-1] if not future_candles.empty else actual_entry,
-            "exit_time": None,
+            "exit_price": round(last_close, 5),
+            "exit_time": str(future_candles["datetime"].iloc[-1]) if not future_candles.empty else "",
             "pips": 0.0,
             "hit_tp": 0,
             "r_multiple": 0.0,
