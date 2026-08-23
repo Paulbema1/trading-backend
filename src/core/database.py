@@ -5,7 +5,7 @@ Supporte :
 - SQLite (local / dev)
 - PostgreSQL (Render / production)
 
-Initialisation et synchronisation automatique du schéma.
+Reconstruction propre et synchronisation du schéma.
 """
 
 from sqlalchemy import create_engine, text
@@ -43,30 +43,22 @@ def get_db():
 
 def init_db():
     """
-    S'assure que la structure des tables PostgreSQL est 100 % conforme.
+    Reconstruit les tables PostgreSQL proprement.
     """
-    # Import des modèles pour enregistrer les métadonnées
+    # Import obligatoire des modèles pour enregistrer les métadonnées
     import src.models.user
     import src.models.signal
 
-    # Nettoyage automatique des anciennes tables obsolètes sur PostgreSQL
+    # Sur PostgreSQL Render : Suppression forcée et validée de l'ancien schéma
     if not DATABASE_URL.startswith("sqlite"):
         try:
-            with engine.connect() as conn:
-                check_query = text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name='users' AND column_name='role';"
-                )
-                res = conn.execute(check_query).fetchone()
-                if not res:
-                    print("⚠️ Ancien schéma PostgreSQL détecté : Réinitialisation propre...")
-                    conn.execute(text("DROP TABLE IF EXISTS signals CASCADE;"))
-                    conn.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
-                    conn.commit()
-                    print("✅ Ancien schéma réinitialisé.")
+            with engine.begin() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS signals CASCADE;"))
+                conn.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
+            print("✅ Ancien schéma PostgreSQL réinitialisé avec succès.")
         except Exception as e:
-            print(f"Note vérification PostgreSQL : {e}")
+            print(f"Note réinitialisation PostgreSQL : {e}")
 
-    # Création des nouvelles tables complètes
+    # Création des nouvelles tables avec TOUTES les colonnes (role, fcm_token, etc.)
     Base.metadata.create_all(bind=engine)
-    print("✅ Tables de la base de données initialisées avec succès.")
+    print("✅ Nouvelles tables PostgreSQL créées avec succès.")
