@@ -1,11 +1,9 @@
 """
 TradeVision AI - Espace Admin & Cockpit de Contrôle (v2).
-
-Réservé exclusivement aux utilisateurs ayant le rôle "ADMIN".
 """
 
-from typing import List, Dict, Any
-from fastapi import APIRouter, Depends, status
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
@@ -28,10 +26,6 @@ def list_users(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """
-    Retourne la liste de tous les utilisateurs inscrits.
-    SÉCURITÉ : Aucun mot de passe ni hash n'est exposé.
-    """
     users = db.query(User).order_by(User.created_at.desc()).all()
 
     result = []
@@ -50,13 +44,11 @@ def list_users(
 
 @router.get("/keys-metrics", response_model=List[Dict[str, Any]])
 def get_twelve_data_metrics(admin: User = Depends(require_admin)):
-    """Affiche l'état en direct des clés Twelve Data (429, Cooldowns, Requêtes totales)."""
     return request_manager.get_status_metrics()
 
 
 @router.post("/cache/clear", status_code=status.HTTP_200_OK)
 def clear_cache(admin: User = Depends(require_admin)):
-    """Vide le cache mémoire des bougies et des prix."""
     market_cache.clear()
     return {"message": "Cache mémoire vidé avec succès."}
 
@@ -66,12 +58,7 @@ async def trigger_full_market_scan(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """
-    Mode Télécommande : Lance un scan instantané de tous les actifs supportés
-    (EUR/USD, GBP/USD, USD/JPY, XAU/USD) et diffuse les signaux validés.
-    """
     scan_results = []
-
     for asset in SUPPORTED_ASSETS:
         try:
             signal = await signal_engine.generate_signal(
@@ -79,8 +66,6 @@ async def trigger_full_market_scan(
                 main_tf=MAIN_TIMEFRAME,
                 confirm_tf=CONFIRMATION_TIMEFRAME,
             )
-
-            # Diffusion si signal d'action
             if signal.action.value in ("BUY", "SELL"):
                 await notification_service.broadcast_signal(signal, db)
 
@@ -96,3 +81,24 @@ async def trigger_full_market_scan(
             scan_results.append({"symbol": asset, "error": str(e)})
 
     return {"message": "Scan terminé", "results": scan_results}
+
+
+@router.post("/backtest", status_code=status.HTTP_200_OK)
+def run_backtest_route(
+    symbol: str = Query(default="EUR/USD"),
+    main_tf: str = Query(default="1h"),
+    confirm_tf: str = Query(default="4h"),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    admin: User = Depends(require_admin),
+):
+    """Exécute une simulation de backtest sur les données historiques."""
+    from src.backtest.engine import backtest_engine
+    res = backtest_engine.run_backtest(
+        symbol=symbol,
+        main_tf=main_tf,
+        confirm_tf=confirm_tf,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return res
