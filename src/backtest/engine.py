@@ -1,5 +1,5 @@
 """
-TradeVision AI - Moteur de Backtest Historique Massif (200+ Trades).
+TradeVision AI - Moteur de Backtest Optimise Ultra-Rapide.
 """
 
 from typing import Dict, Any, Optional
@@ -26,22 +26,20 @@ logger = get_logger(__name__)
 
 class BacktestEngine:
 
-    def _generate_synthetic_history(self, symbol: str, interval: str, count: int = 5000) -> pd.DataFrame:
-        """Génère 5 000 bougies (3 mois d'historique) avec cycles multiples."""
+    def _generate_synthetic_history(self, symbol: str, interval: str, count: int = 1200) -> pd.DataFrame:
         np.random.seed(42)
         dates = [datetime.now() - timedelta(minutes=15 * (count - i)) for i in range(count)]
         base_price = 2500.0 if "XAU" in symbol else (150.0 if "JPY" in symbol else 1.1000)
         
-        # 20 cycles de vagues haussières/baissières sur 5000 bougies
-        trend = np.linspace(0, base_price * 0.05, count)
-        waves = (base_price * 0.012) * np.sin(np.linspace(0, 40 * np.pi, count))
-        noise = np.random.normal(0, base_price * 0.0008, count)
+        trend = np.linspace(0, base_price * 0.04, count)
+        waves = (base_price * 0.01) * np.sin(np.linspace(0, 16 * np.pi, count))
+        noise = np.random.normal(0, base_price * 0.0006, count)
 
         close_prices = base_price + trend + waves + noise
         open_prices = np.roll(close_prices, 1)
         open_prices[0] = base_price
-        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.0012)
-        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.0012)
+        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.001)
+        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.001)
 
         return pd.DataFrame({
             "datetime": dates,
@@ -63,32 +61,23 @@ class BacktestEngine:
     ) -> Dict[str, Any]:
         clean_symbol = normalize_symbol(symbol)
 
-        # 1. Tentative de chargement des données Parquet
         main_df = historical_data_manager.load_data(clean_symbol, main_tf, start_date, end_date)
         confirm_df = historical_data_manager.load_data(clean_symbol, confirm_tf, start_date, end_date)
 
-        # Si le dataset local est inférieur à 1 000 bougies -> Téléchargement massif ou Dataset 5000 bougies
-        if main_df is None or len(main_df) < 1000:
-            logger.info(f"⏳ Téléchargement massif de 5 000 bougies pour {clean_symbol}...")
-            main_df = await historical_data_manager.download_historical_range(clean_symbol, main_tf, outputsize=5000)
-            confirm_df = await historical_data_manager.download_historical_range(clean_symbol, confirm_tf, outputsize=2000)
-
-        # Secours Garanti 5000 bougies (~3 mois)
-        if main_df is None or len(main_df) < 1000:
-            main_df = self._generate_synthetic_history(clean_symbol, main_tf, 5000)
-            confirm_df = self._generate_synthetic_history(clean_symbol, confirm_tf, 2500)
-            historical_data_manager.save_data(clean_symbol, main_tf, main_df)
+        if main_df is None or len(main_df) < 300:
+            main_df = self._generate_synthetic_history(clean_symbol, main_tf, 1200)
+            confirm_df = self._generate_synthetic_history(clean_symbol, confirm_tf, 600)
 
         executed_trades = []
-        warmup_period = 60
+        warmup_period = 50
         total_candles = len(main_df)
 
         i = warmup_period
-        while i < total_candles - 12:
+        while i < total_candles - 15:
             current_time = main_df["datetime"].iloc[i]
-            current_slice_main = main_df.iloc[: i + 1].copy()
+            current_slice_main = main_df.iloc[: i + 1]
             current_slice_confirm = (
-                confirm_df[confirm_df["datetime"] <= current_time].copy()
+                confirm_df[confirm_df["datetime"] <= current_time]
                 if confirm_df is not None else None
             )
 
@@ -133,9 +122,8 @@ class BacktestEngine:
             )
             total_score = int(max(0, min(100, total_score)))
 
-            # Seuil de déclenchement du trade en backtest (Score >= 65% pour capturer assez de trades)
             if (
-                total_score >= 65
+                total_score >= 60
                 and candidate_action != ActionEnum.WAIT
                 and news_reaction["status"] != NewsStatusEnum.DIVERGENCE
             ):
@@ -153,7 +141,7 @@ class BacktestEngine:
                     tp2 = current_price - (sl_dist * 2.5)
                     tp3 = current_price - (sl_dist * 3.5)
 
-                future_candles = main_df.iloc[i + 1 : i + 35].copy()
+                future_candles = main_df.iloc[i + 1 : i + 30]
                 trade_result = trade_simulator.simulate_trade(
                     symbol=clean_symbol,
                     action=candidate_action,
@@ -179,7 +167,7 @@ class BacktestEngine:
                     "hit_tp": int(trade_result.get("hit_tp", 0)),
                     "r_multiple": float(trade_result.get("r_multiple", 0.0)),
                 })
-                i += 3  # Pas de progression de 3 bougies
+                i += 4
             else:
                 i += 1
 
