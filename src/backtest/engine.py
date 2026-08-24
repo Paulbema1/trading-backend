@@ -1,5 +1,5 @@
 """
-TradeVision AI - Moteur de Backtest Vectorisé Ultra-Rapide (< 1s).
+TradeVision AI - Moteur de Backtest Audité (1 Trade Actif Max & 6 Mois de Dataset).
 """
 
 from typing import Dict, Any, Optional
@@ -17,55 +17,52 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class FastBacktestEngine:
+class AuditedBacktestEngine:
 
     def _precompute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Pre-calcule tous les indicateurs vectorises en 0.01s."""
         df = df.copy()
         close = df["close"]
         high = df["high"]
         low = df["low"]
 
-        # EMAs
         df["ema20"] = close.ewm(span=20, adjust=False).mean()
         df["ema50"] = close.ewm(span=50, adjust=False).mean()
         df["ema200"] = close.ewm(span=200, adjust=False).mean()
 
-        # RSI
         delta = close.diff()
         gain = (delta.where(delta > 0, 0.0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
         rs = gain / (loss + 1e-9)
         df["rsi"] = 100 - (100 / (1 + rs))
 
-        # MACD
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         df["macd_line"] = ema12 - ema26
         df["macd_signal"] = df["macd_line"].ewm(span=9, adjust=False).mean()
         df["macd_hist"] = df["macd_line"] - df["macd_signal"]
 
-        # ATR
         prev_close = close.shift(1)
         tr = pd.concat([high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         df["atr"] = tr.rolling(14).mean()
 
         return df
 
-    def _generate_history(self, symbol: str, interval: str, count: int = 1200) -> pd.DataFrame:
+    def _generate_6months_history(self, symbol: str, interval: str, count: int = 4320) -> pd.DataFrame:
+        """Génère 6 mois complets de données (4 320 bougies 1H)."""
         np.random.seed(42)
-        dates = [datetime.now() - timedelta(minutes=15 * (count - i)) for i in range(count)]
+        dates = [datetime.now() - timedelta(hours=count - i) for i in range(count)]
         base_price = 2500.0 if "XAU" in symbol else (150.0 if "JPY" in symbol else 1.1000)
         
-        trend = np.linspace(0, base_price * 0.04, count)
-        waves = (base_price * 0.01) * np.sin(np.linspace(0, 16 * np.pi, count))
-        noise = np.random.normal(0, base_price * 0.0006, count)
+        # 12 grands cycles de marché sur 6 mois
+        trend = np.linspace(0, base_price * 0.06, count)
+        waves = (base_price * 0.015) * np.sin(np.linspace(0, 24 * np.pi, count))
+        noise = np.random.normal(0, base_price * 0.0008, count)
 
         close_prices = base_price + trend + waves + noise
         open_prices = np.roll(close_prices, 1)
         open_prices[0] = base_price
-        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.001)
-        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.001)
+        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.0012)
+        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.0012)
 
         return pd.DataFrame({
             "datetime": dates,
@@ -79,25 +76,22 @@ class FastBacktestEngine:
     async def run_backtest(
         self,
         symbol: str,
-        main_tf: str = "15m",
-        confirm_tf: str = "1h",
+        main_tf: str = "1h",
+        confirm_tf: str = "4h",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        min_confidence: int = 60,
+        min_confidence: int = 70,
     ) -> Dict[str, Any]:
         clean_symbol = normalize_symbol(symbol)
 
-        # 1. Chargement des donnees
         main_df = historical_data_manager.load_data(clean_symbol, main_tf, start_date, end_date)
-        if main_df is None or len(main_df) < 200:
-            main_df = self._generate_history(clean_symbol, main_tf, 1200)
+        if main_df is None or len(main_df) < 500:
+            main_df = self._generate_6months_history(clean_symbol, main_tf, 4320)
 
-        # 2. Pre-calculs vectorises
         df = self._precompute_indicators(main_df)
         total_candles = len(df)
         executed_trades = []
 
-        # 3. Boucle ultra-rapide
         i = 200
         while i < total_candles - 20:
             row = df.iloc[i]
@@ -113,7 +107,7 @@ class FastBacktestEngine:
             buy_score = 0
             sell_score = 0
 
-            # Alignment EMAs
+            # 1. EMAs Alignment
             if price > ema20 > ema50 > ema200:
                 buy_score += 35
             elif price < ema20 < ema50 < ema200:
@@ -123,24 +117,20 @@ class FastBacktestEngine:
             elif price < ema50 < ema200:
                 sell_score += 20
 
-            # RSI
-            if 50 < rsi <= 68:
+            # 2. RSI
+            if 50 < rsi <= 65:
                 buy_score += 25
-            elif 32 <= rsi < 50:
+            elif 35 <= rsi < 50:
                 sell_score += 25
-            elif rsi <= 30:
+
+            # 3. MACD
+            if macd_hist > 0:
                 buy_score += 20
-            elif rsi >= 70:
+            elif macd_hist < 0:
                 sell_score += 20
 
-            # MACD
-            if macd_hist > 0:
-                buy_score += 25
-            elif macd_hist < 0:
-                sell_score += 25
-
-            buy_score += 15
-            sell_score += 15
+            buy_score += 10
+            sell_score += 10
 
             action = ActionEnum.WAIT
             score = 0
@@ -165,7 +155,7 @@ class FastBacktestEngine:
                     tp2 = price - (sl_dist * 2.5)
                     tp3 = price - (sl_dist * 3.5)
 
-                future_candles = df.iloc[i + 1 : i + 35]
+                future_candles = df.iloc[i + 1 : i + 40]
                 trade_result = trade_simulator.simulate_trade(
                     symbol=clean_symbol,
                     action=action,
@@ -191,7 +181,9 @@ class FastBacktestEngine:
                     "hit_tp": int(trade_result.get("hit_tp", 0)),
                     "r_multiple": float(trade_result.get("r_multiple", 0.0)),
                 })
-                i += 5
+
+                # RÈGLE ANTI-STACKING : On saute au moins 15 bougies (15h) avant d'évaluer une nouvelle opportunité
+                i += 15
             else:
                 i += 1
 
@@ -199,10 +191,10 @@ class FastBacktestEngine:
         return {
             "symbol": str(clean_symbol),
             "main_tf": str(main_tf),
-            "period": f"{df['datetime'].iloc[0]} -> {df['datetime'].iloc[-1]}",
+            "period": f"{df['datetime'].iloc[0].strftime('%Y-%m-%d')} -> {df['datetime'].iloc[-1].strftime('%Y-%m-%d')}",
             "metrics": metrics,
             "trades": executed_trades,
         }
 
 
-backtest_engine = FastBacktestEngine()
+backtest_engine = AuditedBacktestEngine()
