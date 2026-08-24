@@ -1,10 +1,11 @@
 """
-TradeVision AI - Stockage et Gestion des Données Historiques.
+TradeVision AI - Stockage et Gestion des Données Historiques Réelles.
+
+Prohibition absolue des données synthétiques/aléatoires.
 """
 
-import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 import pandas as pd
 import httpx
 
@@ -34,9 +35,6 @@ class HistoricalDataManager:
         symbol_dir.mkdir(parents=True, exist_ok=True)
         return symbol_dir / f"{interval}.parquet"
 
-    def has_data(self, symbol: str, interval: str) -> bool:
-        return self._get_file_path(symbol, interval).exists()
-
     def load_data(
         self,
         symbol: str,
@@ -44,9 +42,10 @@ class HistoricalDataManager:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
+        """Charge uniquement des données réelles depuis le stockage Parquet local."""
         file_path = self._get_file_path(symbol, interval)
         if not file_path.exists():
-            logger.warning(f"Aucune donnée locale trouvée pour {symbol} ({interval}) à {file_path}")
+            logger.warning(f"Aucune donnée locale réelle trouvée pour {symbol} ({interval}) à {file_path}")
             return None
 
         try:
@@ -75,7 +74,7 @@ class HistoricalDataManager:
                 df = pd.concat([existing_df, df]).drop_duplicates(subset=["datetime"]).sort_values("datetime")
 
             df.to_parquet(file_path, index=False, engine="pyarrow")
-            logger.info(f"💾 Sauvegardé {len(df)} bougies pour {symbol} ({interval}) dans {file_path}")
+            logger.info(f"💾 Sauvegardé {len(df)} bougies réelles pour {symbol} ({interval}) dans {file_path}")
             return True
         except Exception as e:
             logger.error(f"Erreur d'écriture Parquet : {e}")
@@ -87,6 +86,7 @@ class HistoricalDataManager:
         interval: str = "1h",
         outputsize: int = 5000,
     ) -> Optional[pd.DataFrame]:
+        """Télécharge de vraies données historiques depuis Twelve Data."""
         clean_symbol = normalize_symbol(symbol)
         api_interval = self._normalize_interval(interval)
         api_key = TWELVE_DATA_API_KEYS[0] if TWELVE_DATA_API_KEYS else None
@@ -103,7 +103,6 @@ class HistoricalDataManager:
             "format": "JSON",
         }
 
-        logger.info(f"⏳ Téléchargement unique de {outputsize} bougies pour {clean_symbol} ({interval})...")
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(url, params=params)
@@ -121,7 +120,7 @@ class HistoricalDataManager:
                     self.save_data(clean_symbol, interval, df)
                     return df
         except Exception as e:
-            logger.error(f"Erreur téléchargement historique : {e}")
+            logger.error(f"Erreur téléchargement historique réel : {e}")
 
         return None
 

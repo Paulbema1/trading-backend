@@ -89,6 +89,7 @@ async def run_backtest_route(
     confirm_tf: str = Query(default="4h"),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    compounding: bool = Query(default=False),
     admin: User = Depends(require_admin),
 ):
     try:
@@ -99,6 +100,7 @@ async def run_backtest_route(
             confirm_tf=confirm_tf,
             start_date=start_date,
             end_date=end_date,
+            compounding=compounding,
         )
         return res
     except Exception as e:
