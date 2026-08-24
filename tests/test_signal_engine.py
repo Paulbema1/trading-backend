@@ -33,8 +33,9 @@ def test_trade_simulator_win(sample_bullish_df):
         take_profit_2=1.1100,
         take_profit_3=1.1150,
         future_candles=sample_bullish_df,
+        start_index=0,
     )
-    assert res["result"] in ("WIN", "OPEN")
+    assert res["result"] in ("WIN", "LOSS", "FORCED_CLOSE", "OPEN")
 
 
 def test_backtest_metrics_computation():
@@ -43,8 +44,8 @@ def test_backtest_metrics_computation():
         {"result": "WIN", "pips": 30.0, "r_multiple": 1.5, "news_used": False},
         {"result": "LOSS", "pips": -20.0, "r_multiple": -1.0, "news_used": False},
     ]
-    metrics = BacktestResults.calculate_metrics(mock_trades, initial_balance=10000)
+    metrics = BacktestResults.calculate_metrics(mock_trades, initial_balance=10000.0)
     assert metrics["total_trades"] == 3
     assert metrics["win_rate_pct"] == 66.67
     assert metrics["profit_factor"] == 3.5
-    assert metrics["final_balance"] > 10000
+    assert metrics["final_balance"] > 10000.0

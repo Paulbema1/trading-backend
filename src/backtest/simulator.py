@@ -22,7 +22,7 @@ class TradeSimulator:
         take_profit_2: float,
         take_profit_3: float,
         future_candles: pd.DataFrame,
-        start_index: int,
+        start_index: int = 0,
     ) -> Dict[str, Any]:
         pip_unit = 0.01 if "JPY" in symbol else (0.1 if "XAU" in symbol else 0.0001)
         spread_cost = self.spread_pips * pip_unit
