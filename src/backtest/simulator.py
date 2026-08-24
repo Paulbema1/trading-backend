@@ -1,5 +1,5 @@
 """
-TradeVision AI - Simulateur d'Exécution de Trades (Backtest).
+TradeVision AI - Simulateur d'Exécution Conservateur (Pessimisme de Sécurité).
 """
 
 from typing import Dict, Any
@@ -8,7 +8,6 @@ from src.schemas.signal import ActionEnum
 
 
 class TradeSimulator:
-    """Simulateur d'ordres réaliste (SL, TP1, TP2, TP3, R:R)."""
 
     def __init__(self, spread_pips: float = 1.0):
         self.spread_pips = spread_pips
@@ -36,6 +35,18 @@ class TradeSimulator:
 
             # ── BUY ────────────────────────────────────────────────
             if action == ActionEnum.BUY:
+                # Si SL et TP1 touches dans la MEME bougie -> REGLE CONSERVATRICE : PERTE (SL)
+                if low <= stop_loss and high >= take_profit_1:
+                    loss_pips = (actual_entry - stop_loss) / pip_unit
+                    return {
+                        "result": "LOSS",
+                        "exit_price": round(stop_loss, 5),
+                        "exit_time": candle_time_str,
+                        "pips": -round(loss_pips, 1),
+                        "hit_tp": 0,
+                        "r_multiple": -1.0,
+                    }
+
                 if low <= stop_loss:
                     loss_pips = (actual_entry - stop_loss) / pip_unit
                     return {
@@ -46,6 +57,7 @@ class TradeSimulator:
                         "hit_tp": 0,
                         "r_multiple": -1.0,
                     }
+
                 if high >= take_profit_3:
                     gain_pips = (take_profit_3 - actual_entry) / pip_unit
                     return {"result": "WIN", "exit_price": round(take_profit_3, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 3, "r_multiple": 3.5}
@@ -58,6 +70,17 @@ class TradeSimulator:
 
             # ── SELL ───────────────────────────────────────────────
             elif action == ActionEnum.SELL:
+                if high >= stop_loss and low <= take_profit_1:
+                    loss_pips = (stop_loss - actual_entry) / pip_unit
+                    return {
+                        "result": "LOSS",
+                        "exit_price": round(stop_loss, 5),
+                        "exit_time": candle_time_str,
+                        "pips": -round(loss_pips, 1),
+                        "hit_tp": 0,
+                        "r_multiple": -1.0,
+                    }
+
                 if high >= stop_loss:
                     loss_pips = (stop_loss - actual_entry) / pip_unit
                     return {
@@ -68,6 +91,7 @@ class TradeSimulator:
                         "hit_tp": 0,
                         "r_multiple": -1.0,
                     }
+
                 if low <= take_profit_3:
                     gain_pips = (actual_entry - take_profit_3) / pip_unit
                     return {"result": "WIN", "exit_price": round(take_profit_3, 5), "exit_time": candle_time_str, "pips": round(gain_pips, 1), "hit_tp": 3, "r_multiple": 3.5}

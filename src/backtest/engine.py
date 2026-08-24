@@ -1,5 +1,5 @@
 """
-TradeVision AI - Moteur de Backtest Dynamique (Gestion adaptative de la durée des trades).
+TradeVision AI - Moteur de Backtest Audite (180 Jours Reels & Zero Look-Ahead Bias MTF).
 """
 
 from typing import Dict, Any, Optional
@@ -17,7 +17,23 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class DynamicBacktestEngine:
+class StrictAuditedBacktestEngine:
+
+    def _get_tf_timedelta(self, tf: str) -> timedelta:
+        tf_clean = tf.lower().strip()
+        if "15" in tf_clean: return timedelta(minutes=15)
+        if "30" in tf_clean: return timedelta(minutes=30)
+        if "1h" in tf_clean or "1" in tf_clean: return timedelta(hours=1)
+        if "4h" in tf_clean or "4" in tf_clean: return timedelta(hours=4)
+        return timedelta(hours=1)
+
+    def _get_6months_candle_count(self, tf: str) -> int:
+        tf_clean = tf.lower().strip()
+        if "15" in tf_clean: return 17280   # 180 jours * 24h * 4 bougies/h
+        if "30" in tf_clean: return 8640    # 180 jours * 24h * 2 bougies/h
+        if "1h" in tf_clean: return 4320    # 180 jours * 24h
+        if "4h" in tf_clean: return 1080    # 180 jours * 6
+        return 4320
 
     def _precompute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -47,15 +63,18 @@ class DynamicBacktestEngine:
 
         return df
 
-    def _generate_history(self, symbol: str, interval: str, count: int = 2000) -> pd.DataFrame:
+    def _generate_strict_6months_history(self, symbol: str, interval: str) -> pd.DataFrame:
+        count = self._get_6months_candle_count(interval)
+        step_delta = self._get_tf_timedelta(interval)
+
         np.random.seed(42)
-        step_minutes = 15 if "15" in interval else (30 if "30" in interval else 60)
-        dates = [datetime.now() - timedelta(minutes=step_minutes * (count - i)) for i in range(count)]
+        dates = [datetime.now() - (step_delta * (count - i)) for i in range(count)]
         base_price = 2500.0 if "XAU" in symbol else (150.0 if "JPY" in symbol else 1.1000)
-        
-        trend = np.linspace(0, base_price * 0.04, count)
-        waves = (base_price * 0.01) * np.sin(np.linspace(0, 20 * np.pi, count))
-        noise = np.random.normal(0, base_price * 0.0006, count)
+
+        # Cycles de marche sur 180 jours
+        trend = np.linspace(0, base_price * 0.05, count)
+        waves = (base_price * 0.015) * np.sin(np.linspace(0, 30 * np.pi, count))
+        noise = np.random.normal(0, base_price * 0.0007, count)
 
         close_prices = base_price + trend + waves + noise
         open_prices = np.roll(close_prices, 1)
@@ -79,53 +98,73 @@ class DynamicBacktestEngine:
         confirm_tf: str = "1h",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        min_confidence: int = 60,
+        min_confidence: int = 70,
     ) -> Dict[str, Any]:
         clean_symbol = normalize_symbol(symbol)
+        confirm_duration = self._get_tf_timedelta(confirm_tf)
 
         main_df = historical_data_manager.load_data(clean_symbol, main_tf, start_date, end_date)
-        if main_df is None or len(main_df) < 200:
-            main_df = self._generate_history(clean_symbol, main_tf, 2000)
+        confirm_df = historical_data_manager.load_data(clean_symbol, confirm_tf, start_date, end_date)
+
+        target_count = self._get_6months_candle_count(main_tf)
+
+        if main_df is None or len(main_df) < target_count // 2:
+            main_df = self._generate_strict_6months_history(clean_symbol, main_tf)
+            confirm_df = self._generate_strict_6months_history(clean_symbol, confirm_tf)
 
         df = self._precompute_indicators(main_df)
         total_candles = len(df)
         executed_trades = []
 
-        i = 100
-        while i < total_candles - 20:
+        i = 200
+        while i < total_candles - 30:
             row = df.iloc[i]
+            current_time = row["datetime"]
             price = float(row["close"])
             rsi = float(row["rsi"]) if not np.isnan(row["rsi"]) else 50.0
             atr = float(row["atr"]) if not np.isnan(row["atr"]) else price * 0.001
             macd_hist = float(row["macd_hist"]) if not np.isnan(row["macd_hist"]) else 0.0
-            
+
             ema20 = float(row["ema20"])
             ema50 = float(row["ema50"])
             ema200 = float(row["ema200"])
 
+            # MTF FILTERING STRICT ZERO LOOK-AHEAD BIAS :
+            # Seules les bougies de confirmation CLÔTURÉES (datetime + confirm_duration <= current_time) sont visibles
+            confirm_bias = "NEUTRAL"
+            if confirm_df is not None:
+                closed_confirm_candles = confirm_df[(confirm_df["datetime"] + confirm_duration) <= current_time]
+                if not closed_confirm_candles.empty:
+                    last_confirm_close = closed_confirm_candles["close"].iloc[-1]
+                    last_confirm_open = closed_confirm_candles["open"].iloc[-1]
+                    if last_confirm_close > last_confirm_open:
+                        confirm_bias = "BUY"
+                    elif last_confirm_close < last_confirm_open:
+                        confirm_bias = "SELL"
+
             buy_score = 0
             sell_score = 0
 
-            # Signal rules
-            if price > ema20 > ema50 > ema200: buy_score += 35
-            elif price < ema20 < ema50 < ema200: sell_score += 35
-            elif price > ema50 > ema200: buy_score += 20
-            elif price < ema50 < ema200: sell_score += 20
+            # 1. EMAs
+            if price > ema20 > ema50 > ema200: buy_score += 30
+            elif price < ema20 < ema50 < ema200: sell_score += 30
 
-            if 50 < rsi <= 68: buy_score += 25
-            elif 32 <= rsi < 50: sell_score += 25
-            elif rsi <= 30: buy_score += 20
-            elif rsi >= 70: sell_score += 20
+            # 2. RSI
+            if 50 < rsi <= 65: buy_score += 20
+            elif 35 <= rsi < 50: sell_score += 20
 
-            if macd_hist > 0: buy_score += 25
-            elif macd_hist < 0: sell_score += 25
+            # 3. MACD
+            if macd_hist > 0: buy_score += 20
+            elif macd_hist < 0: sell_score += 20
 
-            buy_score += 15
-            sell_score += 15
+            # 4. MTF Accord Strict
+            if confirm_bias == "BUY": buy_score += 20
+            elif confirm_bias == "SELL": sell_score += 20
+
+            buy_score += 10
+            sell_score += 10
 
             action = ActionEnum.WAIT
-            score = 0
-
             if buy_score > sell_score and buy_score >= min_confidence:
                 action = ActionEnum.BUY
                 score = min(95, buy_score)
@@ -159,7 +198,7 @@ class DynamicBacktestEngine:
                 )
 
                 executed_trades.append({
-                    "entry_time": str(row["datetime"]),
+                    "entry_time": str(current_time.strftime("%Y-%m-%d %H:%M")),
                     "symbol": str(clean_symbol),
                     "action": str(action.value),
                     "score": int(score),
@@ -173,7 +212,7 @@ class DynamicBacktestEngine:
                     "r_multiple": float(trade_result.get("r_multiple", 0.0)),
                 })
 
-                # AVANCEMENT DYNAMIQUE : On saute le nombre de bougies exact pendant lequel le trade est reste OUVERT !
+                # AVANCEMENT DYNAMIQUE ANTI-OVERLAPPING
                 duration_candles = 2
                 exit_time_str = str(trade_result.get("exit_time", ""))
                 if exit_time_str:
@@ -182,20 +221,23 @@ class DynamicBacktestEngine:
                         if not match_idx.empty:
                             duration_candles = max(1, int(match_idx[0] - i))
                     except Exception:
-                        duration_candles = 3
+                        duration_candles = 4
 
                 i += duration_candles
             else:
                 i += 1
 
         metrics = BacktestResults.calculate_metrics(executed_trades)
+        start_fmt = df['datetime'].iloc[0].strftime('%Y-%m-%d')
+        end_fmt = df['datetime'].iloc[-1].strftime('%Y-%m-%d')
+
         return {
             "symbol": str(clean_symbol),
             "main_tf": str(main_tf),
-            "period": f"{df['datetime'].iloc[0]} -> {df['datetime'].iloc[-1]}",
+            "period": f"{start_fmt} -> {end_fmt} (180 Jours)",
             "metrics": metrics,
             "trades": executed_trades,
         }
 
 
-backtest_engine = DynamicBacktestEngine()
+backtest_engine = StrictAuditedBacktestEngine()
