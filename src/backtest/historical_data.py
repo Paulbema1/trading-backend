@@ -1,14 +1,10 @@
 """
 TradeVision AI - Stockage et Gestion des Données Historiques.
-
-- Téléchargement par blocs depuis Twelve Data (une seule fois).
-- Sauvegarde locale ultra-rapide et compressée (.parquet).
-- Rechargement instantané avec 0 requête API.
 """
 
 import os
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List
 import pandas as pd
 import httpx
 
@@ -17,16 +13,20 @@ from src.utils.helpers import normalize_symbol
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
-
 DATA_DIR = Path("data")
 
 
 class HistoricalDataManager:
-    """Gestionnaire de base de données locale Parquet pour le backtesting."""
 
     def __init__(self, base_dir: Path = DATA_DIR):
         self.base_dir = base_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def _normalize_interval(self, interval: str) -> str:
+        inv = interval.lower().strip()
+        if inv == "15m": return "15min"
+        if inv == "30m": return "30min"
+        return inv
 
     def _get_file_path(self, symbol: str, interval: str) -> Path:
         clean_sym = symbol.replace("/", "").upper()
@@ -35,7 +35,6 @@ class HistoricalDataManager:
         return symbol_dir / f"{interval}.parquet"
 
     def has_data(self, symbol: str, interval: str) -> bool:
-        """Vérifie si les données historiques existent déjà en local."""
         return self._get_file_path(symbol, interval).exists()
 
     def load_data(
@@ -45,7 +44,6 @@ class HistoricalDataManager:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> Optional[pd.DataFrame]:
-        """Charge les données historiques depuis le fichier Parquet local."""
         file_path = self._get_file_path(symbol, interval)
         if not file_path.exists():
             logger.warning(f"Aucune donnée locale trouvée pour {symbol} ({interval}) à {file_path}")
@@ -67,7 +65,6 @@ class HistoricalDataManager:
             return None
 
     def save_data(self, symbol: str, interval: str, df: pd.DataFrame) -> bool:
-        """Enregistre ou fusionne un DataFrame dans le stockage Parquet."""
         if df is None or df.empty:
             return False
 
@@ -90,19 +87,17 @@ class HistoricalDataManager:
         interval: str = "1h",
         outputsize: int = 5000,
     ) -> Optional[pd.DataFrame]:
-        """
-        Télécharge un bloc massif d'historique depuis Twelve Data (Consommation UNIQUE).
-        """
         clean_symbol = normalize_symbol(symbol)
+        api_interval = self._normalize_interval(interval)
         api_key = TWELVE_DATA_API_KEYS[0] if TWELVE_DATA_API_KEYS else None
+
         if not api_key:
-            logger.error("Aucune clé Twelve Data configurée pour le téléchargement historique.")
             return None
 
         url = f"{TWELVE_DATA_BASE_URL}/time_series"
         params = {
             "symbol": clean_symbol,
-            "interval": interval,
+            "interval": api_interval,
             "outputsize": outputsize,
             "apikey": api_key,
             "format": "JSON",
@@ -123,13 +118,10 @@ class HistoricalDataManager:
                     df["volume"] = pd.to_numeric(df.get("volume", 0.0), errors="coerce").fillna(0.0)
                     df = df.sort_values("datetime").reset_index(drop=True)
 
-                    # Sauvegarde permanente
                     self.save_data(clean_symbol, interval, df)
                     return df
-                else:
-                    logger.error(f"Erreur Twelve Data : {data.get('message')}")
         except Exception as e:
-            logger.error(f"Erreur lors du téléchargement historique : {e}")
+            logger.error(f"Erreur téléchargement historique : {e}")
 
         return None
 
