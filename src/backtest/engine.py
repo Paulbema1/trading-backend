@@ -1,5 +1,5 @@
 """
-TradeVision AI - Moteur de Backtest Audité (1 Trade Actif Max & 6 Mois de Dataset).
+TradeVision AI - Moteur de Backtest Dynamique (Gestion adaptative de la durée des trades).
 """
 
 from typing import Dict, Any, Optional
@@ -17,7 +17,7 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-class AuditedBacktestEngine:
+class DynamicBacktestEngine:
 
     def _precompute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -47,22 +47,21 @@ class AuditedBacktestEngine:
 
         return df
 
-    def _generate_6months_history(self, symbol: str, interval: str, count: int = 4320) -> pd.DataFrame:
-        """Génère 6 mois complets de données (4 320 bougies 1H)."""
+    def _generate_history(self, symbol: str, interval: str, count: int = 2000) -> pd.DataFrame:
         np.random.seed(42)
-        dates = [datetime.now() - timedelta(hours=count - i) for i in range(count)]
+        step_minutes = 15 if "15" in interval else (30 if "30" in interval else 60)
+        dates = [datetime.now() - timedelta(minutes=step_minutes * (count - i)) for i in range(count)]
         base_price = 2500.0 if "XAU" in symbol else (150.0 if "JPY" in symbol else 1.1000)
         
-        # 12 grands cycles de marché sur 6 mois
-        trend = np.linspace(0, base_price * 0.06, count)
-        waves = (base_price * 0.015) * np.sin(np.linspace(0, 24 * np.pi, count))
-        noise = np.random.normal(0, base_price * 0.0008, count)
+        trend = np.linspace(0, base_price * 0.04, count)
+        waves = (base_price * 0.01) * np.sin(np.linspace(0, 20 * np.pi, count))
+        noise = np.random.normal(0, base_price * 0.0006, count)
 
         close_prices = base_price + trend + waves + noise
         open_prices = np.roll(close_prices, 1)
         open_prices[0] = base_price
-        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.0012)
-        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.0012)
+        high_prices = np.maximum(open_prices, close_prices) + (base_price * 0.001)
+        low_prices = np.minimum(open_prices, close_prices) - (base_price * 0.001)
 
         return pd.DataFrame({
             "datetime": dates,
@@ -76,23 +75,23 @@ class AuditedBacktestEngine:
     async def run_backtest(
         self,
         symbol: str,
-        main_tf: str = "1h",
-        confirm_tf: str = "4h",
+        main_tf: str = "15m",
+        confirm_tf: str = "1h",
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        min_confidence: int = 70,
+        min_confidence: int = 60,
     ) -> Dict[str, Any]:
         clean_symbol = normalize_symbol(symbol)
 
         main_df = historical_data_manager.load_data(clean_symbol, main_tf, start_date, end_date)
-        if main_df is None or len(main_df) < 500:
-            main_df = self._generate_6months_history(clean_symbol, main_tf, 4320)
+        if main_df is None or len(main_df) < 200:
+            main_df = self._generate_history(clean_symbol, main_tf, 2000)
 
         df = self._precompute_indicators(main_df)
         total_candles = len(df)
         executed_trades = []
 
-        i = 200
+        i = 100
         while i < total_candles - 20:
             row = df.iloc[i]
             price = float(row["close"])
@@ -107,30 +106,22 @@ class AuditedBacktestEngine:
             buy_score = 0
             sell_score = 0
 
-            # 1. EMAs Alignment
-            if price > ema20 > ema50 > ema200:
-                buy_score += 35
-            elif price < ema20 < ema50 < ema200:
-                sell_score += 35
-            elif price > ema50 > ema200:
-                buy_score += 20
-            elif price < ema50 < ema200:
-                sell_score += 20
+            # Signal rules
+            if price > ema20 > ema50 > ema200: buy_score += 35
+            elif price < ema20 < ema50 < ema200: sell_score += 35
+            elif price > ema50 > ema200: buy_score += 20
+            elif price < ema50 < ema200: sell_score += 20
 
-            # 2. RSI
-            if 50 < rsi <= 65:
-                buy_score += 25
-            elif 35 <= rsi < 50:
-                sell_score += 25
+            if 50 < rsi <= 68: buy_score += 25
+            elif 32 <= rsi < 50: sell_score += 25
+            elif rsi <= 30: buy_score += 20
+            elif rsi >= 70: sell_score += 20
 
-            # 3. MACD
-            if macd_hist > 0:
-                buy_score += 20
-            elif macd_hist < 0:
-                sell_score += 20
+            if macd_hist > 0: buy_score += 25
+            elif macd_hist < 0: sell_score += 25
 
-            buy_score += 10
-            sell_score += 10
+            buy_score += 15
+            sell_score += 15
 
             action = ActionEnum.WAIT
             score = 0
@@ -182,8 +173,18 @@ class AuditedBacktestEngine:
                     "r_multiple": float(trade_result.get("r_multiple", 0.0)),
                 })
 
-                # RÈGLE ANTI-STACKING : On saute au moins 15 bougies (15h) avant d'évaluer une nouvelle opportunité
-                i += 15
+                # AVANCEMENT DYNAMIQUE : On saute le nombre de bougies exact pendant lequel le trade est reste OUVERT !
+                duration_candles = 2
+                exit_time_str = str(trade_result.get("exit_time", ""))
+                if exit_time_str:
+                    try:
+                        match_idx = df[df["datetime"].astype(str) == exit_time_str].index
+                        if not match_idx.empty:
+                            duration_candles = max(1, int(match_idx[0] - i))
+                    except Exception:
+                        duration_candles = 3
+
+                i += duration_candles
             else:
                 i += 1
 
@@ -191,10 +192,10 @@ class AuditedBacktestEngine:
         return {
             "symbol": str(clean_symbol),
             "main_tf": str(main_tf),
-            "period": f"{df['datetime'].iloc[0].strftime('%Y-%m-%d')} -> {df['datetime'].iloc[-1].strftime('%Y-%m-%d')}",
+            "period": f"{df['datetime'].iloc[0]} -> {df['datetime'].iloc[-1]}",
             "metrics": metrics,
             "trades": executed_trades,
         }
 
 
-backtest_engine = AuditedBacktestEngine()
+backtest_engine = DynamicBacktestEngine()
