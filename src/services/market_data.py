@@ -1,7 +1,5 @@
 """
 TradeVision AI - Service de Données de Marché.
-
-Supporte le basculement transparent vers le Test Lab en mode simulation.
 """
 
 import pandas as pd
@@ -10,7 +8,6 @@ from typing import Tuple, Optional
 from src.utils.cache import market_cache
 from src.utils.helpers import normalize_symbol
 from src.services.request_manager import request_manager
-from src.services.test_lab_service import test_lab_service
 from src.schemas.signal import DataQualityEnum
 from src.core.logging import get_logger
 
@@ -32,17 +29,9 @@ class MarketDataService:
         outputsize: int = 200,
     ) -> Tuple[Optional[pd.DataFrame], DataQualityEnum]:
         clean_symbol = normalize_symbol(symbol)
-
-        # 🧪 INTERCEPTION TEST LAB : Si mode simulation actif -> renvoie les bougies injectées
-        if test_lab_service.is_enabled():
-            injected_df = test_lab_service.get_injected_candles(clean_symbol, interval)
-            if injected_df is not None and not injected_df.empty:
-                logger.debug(f"🧪 [TEST LAB] Utilisation des bougies injectées pour {clean_symbol} ({interval})")
-                return injected_df.copy(), DataQualityEnum.GOOD
-
         api_interval = self._normalize_interval_for_twelve_data(interval)
 
-        # 1. Vérification CACHE
+        # 1. Cache
         cached_df, is_stale = market_cache.get_ohlcv(
             clean_symbol,
             interval,
@@ -102,14 +91,6 @@ class MarketDataService:
 
     async def get_current_price(self, symbol: str) -> Tuple[Optional[float], DataQualityEnum]:
         clean_symbol = normalize_symbol(symbol)
-
-        # 🧪 INTERCEPTION TEST LAB
-        if test_lab_service.is_enabled():
-            injected_df = test_lab_service.get_injected_candles(clean_symbol, "15m")
-            if injected_df is None or injected_df.empty:
-                injected_df = test_lab_service.get_injected_candles(clean_symbol, "1h")
-            if injected_df is not None and not injected_df.empty:
-                return float(injected_df["close"].iloc[-1]), DataQualityEnum.GOOD
 
         cached_price, is_stale = market_cache.get_price(clean_symbol, allow_stale=False)
         if cached_price is not None:

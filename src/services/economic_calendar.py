@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import httpx
 
 from src.core.config import ECONOMIC_CALENDAR_URL
-from src.services.test_lab_service import test_lab_service
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -30,13 +29,6 @@ class EconomicCalendarService:
         return [clean]
 
     async def fetch_calendar(self) -> List[Dict[str, Any]]:
-        # 🧪 INTERCEPTION TEST LAB
-        if test_lab_service.is_enabled():
-            injected = test_lab_service.get_injected_calendar()
-            if injected:
-                logger.debug(f"🧪 [TEST LAB] Utilisation du calendrier injecté ({len(injected)} événements)")
-                return injected
-
         now = time.time()
         if self._cached_events and (now - self._last_fetch_time) < self._cache_ttl_seconds:
             return self._cached_events
@@ -76,16 +68,7 @@ class EconomicCalendarService:
                 "summary": "Aucune donnée calendrier (neutre)",
             }
 
-        # 🧪 Gestion Horloge Virtuelle si présente
-        sim_time = test_lab_service.get_simulated_time() if test_lab_service.is_enabled() else None
-        if sim_time:
-            try:
-                now_dt = datetime.fromisoformat(sim_time.replace("Z", "+00:00"))
-            except Exception:
-                now_dt = datetime.now(timezone.utc)
-        else:
-            now_dt = datetime.now(timezone.utc)
-
+        now_dt = datetime.now(timezone.utc)
         matching_events = []
         has_high_impact = False
 

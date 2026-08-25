@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Optional
 import httpx
 
 from src.core.config import NEWS_RSS_URL
-from src.services.test_lab_service import test_lab_service
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -33,13 +32,6 @@ class NewsService:
         ]
 
     async def fetch_news(self) -> List[Dict[str, Any]]:
-        # 🧪 INTERCEPTION TEST LAB
-        if test_lab_service.is_enabled():
-            injected = test_lab_service.get_injected_news()
-            if injected:
-                logger.debug(f"🧪 [TEST LAB] Utilisation des news injectées ({len(injected)} articles)")
-                return injected
-
         now = time.time()
         if self._cached_news and (now - self._last_fetch_time) < self._cache_ttl_seconds:
             return self._cached_news
