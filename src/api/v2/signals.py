@@ -1,9 +1,8 @@
 """
 TradeVision AI - Routes des Signaux (v2).
-Anti-doublons et filtrage de l'historique.
 """
 
-import json
+json
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
@@ -15,6 +14,7 @@ from src.models.user import User
 from src.models.signal import Signal
 from src.engine.signal_engine import signal_engine
 from src.services.notifications import notification_service
+from src.services.test_lab_service import test_lab_service
 from src.schemas.signal import SignalResponse, SignalHistoryItem, ActionEnum
 from src.core.config import MAIN_TIMEFRAME, CONFIRMATION_TIMEFRAME
 from src.core.logging import get_logger
@@ -37,7 +37,9 @@ async def analyze_asset(
         confirm_tf=confirm_tf,
     )
 
-    # ANTI-DOUBLONS : N'enregistre en base QUE si le dernier signal identique date de plus de 15 minutes
+    # Si mode Test Lab actif -> Pas de filtre anti-doublon !
+    is_test = test_lab_service.is_enabled()
+
     fifteen_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
     last_signal = db.query(Signal).filter(
         Signal.symbol == signal.symbol,
@@ -45,7 +47,8 @@ async def analyze_asset(
         Signal.created_at >= fifteen_mins_ago
     ).first()
 
-    if not last_signal and signal.action != ActionEnum.WAIT:
+    # Enregistre si pas de doublon récent OU si on est en mode Test Lab
+    if (is_test or not last_signal) and signal.action != ActionEnum.WAIT:
         db_signal = Signal(
             symbol=signal.symbol,
             action=signal.action.value,
