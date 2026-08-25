@@ -1,7 +1,5 @@
 """
 TradeVision AI - Point d'entrée principal de l'application.
-
-Version : 9.0.0
 """
 
 import asyncio
@@ -15,7 +13,6 @@ from src.core.config import (
     APP_VERSION,
     API_TITLE,
     API_DESCRIPTION,
-    CORS_ORIGINS,
     SUPPORTED_ASSETS,
     MAIN_TIMEFRAME,
     CONFIRMATION_TIMEFRAME,
@@ -51,8 +48,8 @@ async def keep_alive_task():
             logger.debug("🔄 Anti-veille : Auto-ping exécuté.")
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            logger.debug(f"⚠️ Anti-veille : {e}")
+        except Exception:
+            pass
 
 
 async def auto_scan_task():
@@ -61,7 +58,6 @@ async def auto_scan_task():
 
     while True:
         try:
-            # Ne fait l'auto-scan réel que si le mode simulation est désactivé
             if not test_lab_service.is_enabled():
                 logger.info("🤖 Auto-Scan : Analyse automatique des marchés...")
                 db = SessionLocal()
@@ -147,10 +143,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Configuration CORS universelle
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
