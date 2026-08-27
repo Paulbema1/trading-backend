@@ -8,7 +8,7 @@ import json
 import httpx
 from typing import Dict, Any, Tuple
 
-from src.core.config import OPENROUTER_API_KEY, OPENROUTER_CHAT_URL
+from src.core.config import OPENROUTER_API_KEY, OPENROUTER_CHAT_URL, OPENROUTER_MODEL
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -60,7 +60,7 @@ Réponds EXCLUSIVEMENT sous la forme d'un objet JSON strict avec deux clés :
                 "Content-Type": "application/json",
             }
             body = {
-                "model": "meta-llama/llama-3-8b-instruct:free",  # Modèle rapide et gratuit
+                "model": OPENROUTER_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
             }

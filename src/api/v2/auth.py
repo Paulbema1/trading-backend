@@ -20,7 +20,9 @@ from src.schemas.user import (
     UserResponse,
     FCMTokenUpdate,
     UserPreferencesUpdate,
+    SystemTimeframeResponse,
 )
+from src.services.system_config import system_config_service
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -119,6 +121,12 @@ def update_fcm_token(
     db.commit()
     return {"message": "Token de notification enregistré."}
 
+
+
+@router.get("/system-timeframes", response_model=SystemTimeframeResponse)
+def get_system_timeframes_for_user(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    cfg = system_config_service.get(db)
+    return SystemTimeframeResponse(main_timeframe=cfg.main_timeframe, confirmation_timeframe=cfg.confirmation_timeframe)
 
 @router.get("/me", response_model=UserResponse)
 def get_profile(current_user: User = Depends(get_current_user)):

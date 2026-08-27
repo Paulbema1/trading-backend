@@ -117,7 +117,8 @@ CONFIRMATION_TIMEFRAME = os.getenv("CONFIRMATION_TIMEFRAME", "4h").strip()
 # ============================================================
 
 DEFAULT_MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "70"))
-DEFAULT_REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "5"))
+DEFAULT_REFRESH_INTERVAL = int(os.getenv("REFRESH_INTERVAL", "15"))
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct:free").strip()
 
 
 # ============================================================

@@ -7,7 +7,7 @@ Responsabilités :
 - Formater un message clair et lisible avec l'Entry, SL, TP1, TP2, TP3 et Timeframe
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
 from src.models.user import User
@@ -85,12 +85,15 @@ class NotificationService:
         }
 
         # 3. Envoi multicast via Firebase
-        result = send_notification_to_many(
-            tokens=target_tokens,
-            title=title,
-            body=body,
-            data=data_payload,
-        )
+        result = send_notification_to_many(tokens=target_tokens, title=title, body=body, data=data_payload)
+
+        # Nettoyage des tokens définitivement invalides.
+        invalid = set(result.get("invalid_tokens", []))
+        if invalid:
+            for user in users:
+                if user.fcm_token and user.fcm_token.strip() in invalid:
+                    user.fcm_token = None
+            db.commit()
 
         logger.info(
             f"Notification {signal.action.value} {signal.symbol} envoyée à {result.get('success', 0)} appareil(s)."

@@ -36,6 +36,7 @@ def get_db():
 def init_db():
     import src.models.user
     import src.models.signal
+    import src.models.system_config
 
     # Crée les tables sans jamais les supprimer (Conservation permanente des données)
     Base.metadata.create_all(bind=engine)

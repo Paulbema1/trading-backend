@@ -25,9 +25,8 @@ class TradeSimulator:
         start_index: int = 0,
     ) -> Dict[str, Any]:
         pip_unit = 0.01 if "JPY" in symbol else (0.1 if "XAU" in symbol else 0.0001)
-        spread_cost = self.spread_pips * pip_unit
-
-        actual_entry = entry_price + (spread_cost if action == ActionEnum.BUY else -spread_cost)
+        # v9 : niveaux calculés autour de l'Entry sans spread implicite non spécifié.
+        actual_entry = entry_price
 
         for rel_idx, (abs_idx, row) in enumerate(future_candles.iterrows()):
             high = float(row["high"])

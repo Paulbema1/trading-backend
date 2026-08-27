@@ -6,6 +6,7 @@ Version : 9.0.0
 
 import asyncio
 import httpx
+from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,16 +18,14 @@ from src.core.config import (
     API_DESCRIPTION,
     CORS_ORIGINS,
     SUPPORTED_ASSETS,
-    MAIN_TIMEFRAME,
-    CONFIRMATION_TIMEFRAME,
     DEFAULT_REFRESH_INTERVAL,
 )
 from src.core.database import init_db, SessionLocal
 from src.core.firebase import init_firebase
 from src.core.logging import get_logger
 from src.engine.signal_engine import signal_engine
-from src.services.notifications import notification_service
 from src.models.signal import Signal
+from src.services.system_config import system_config_service
 import json
 
 from src.api.v2.auth import router as auth_router
@@ -53,48 +52,22 @@ async def keep_alive_task():
             pass
 
 
+from src.services.signal_dispatch import persist_and_dispatch
+
 async def auto_scan_task():
     await asyncio.sleep(30)
-    scan_interval_seconds = DEFAULT_REFRESH_INTERVAL * 60
+    scan_interval_seconds = max(1, DEFAULT_REFRESH_INTERVAL) * 60
 
     while True:
         try:
             logger.info("🤖 Auto-Scan : Analyse automatique des marchés...")
             db = SessionLocal()
             try:
+                cfg = system_config_service.get(db)
                 for symbol in SUPPORTED_ASSETS:
-                    signal = await signal_engine.generate_signal(
-                        symbol=symbol,
-                        main_tf=MAIN_TIMEFRAME,
-                        confirm_tf=CONFIRMATION_TIMEFRAME,
-                    )
+                    signal = await signal_engine.generate_signal(symbol=symbol, main_tf=cfg.main_timeframe, confirm_tf=cfg.confirmation_timeframe)
 
-                    db_signal = Signal(
-                        symbol=signal.symbol,
-                        action=signal.action.value,
-                        score=signal.score,
-                        confidence=signal.confidence,
-                        entry_price=signal.entry_price,
-                        stop_loss=signal.stop_loss,
-                        take_profit_1=signal.take_profit_1,
-                        take_profit_2=signal.take_profit_2,
-                        take_profit_3=signal.take_profit_3,
-                        risk_reward=signal.risk_reward,
-                        main_timeframe=signal.main_timeframe,
-                        confirmation_timeframe=signal.confirmation_timeframe,
-                        score_breakdown=json.dumps(signal.score_breakdown) if signal.score_breakdown else None,
-                        news_used=signal.news_used,
-                        news_status=signal.news_status.value if signal.news_status else None,
-                        news_summary=signal.news_summary,
-                        data_quality=signal.data_quality.value,
-                        ai_confirmed=signal.ai_confirmed,
-                        reasons=signal.reasons,
-                    )
-                    db.add(db_signal)
-                    db.commit()
-
-                    if signal.action.value in ("BUY", "SELL"):
-                        await notification_service.broadcast_signal(signal, db)
+                    await persist_and_dispatch(signal, db)
 
             finally:
                 db.close()

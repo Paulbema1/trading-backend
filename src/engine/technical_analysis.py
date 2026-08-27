@@ -87,13 +87,13 @@ class TechnicalAnalysisEngine:
         reasons: List[str] = []
 
         # ── A. Tendance EMAs (8 points max) ──────────────────────
-        if last["close"] > last["ema20"] > last["ema50"] > last["ema200"]:
+        if last["ema20"] > last["ema50"] > last["ema200"]:
             buy_points += 8
             reasons.append("Alignement haussier parfait des EMAs (20 > 50 > 200).")
         elif last["close"] > last["ema50"] > last["ema200"]:
             buy_points += 5
             reasons.append("Tendance haussière confirmée au-dessus de l'EMA 50/200.")
-        elif last["close"] < last["ema20"] < last["ema50"] < last["ema200"]:
+        elif last["ema20"] < last["ema50"] < last["ema200"]:
             sell_points += 8
             reasons.append("Alignement baissier parfait des EMAs (20 < 50 < 200).")
         elif last["close"] < last["ema50"] < last["ema200"]:
@@ -102,10 +102,10 @@ class TechnicalAnalysisEngine:
 
         # ── B. RSI (6 points max) ────────────────────────────────
         rsi_val = last["rsi"]
-        if 50 < rsi_val <= 68:
+        if 50 <= rsi_val <= 65:
             buy_points += 6
             reasons.append(f"RSI haussier équilibré ({rsi_val:.1f}).")
-        elif 32 <= rsi_val < 50:
+        elif 35 <= rsi_val < 50:
             sell_points += 6
             reasons.append(f"RSI baissier équilibré ({rsi_val:.1f}).")
         elif rsi_val <= 30:

@@ -92,10 +92,8 @@ class MarketDataService:
     async def get_current_price(self, symbol: str) -> Tuple[Optional[float], DataQualityEnum]:
         clean_symbol = normalize_symbol(symbol)
 
-        cached_price, is_stale = market_cache.get_price(clean_symbol, allow_stale=False)
-        if cached_price is not None:
-            return cached_price, DataQualityEnum.GOOD
-
+        # L'Entry v9 doit être basé sur le prix courant : on tente donc le endpoint price
+        # à chaque analyse. Le cache n'est utilisé qu'en secours si le réseau/API échoue.
         data, err = await request_manager.execute_request("price", {"symbol": clean_symbol})
         if data and "price" in data:
             try:
@@ -105,11 +103,12 @@ class MarketDataService:
             except ValueError:
                 pass
 
-        df, quality = await self.get_candles_df(clean_symbol, interval="15m", outputsize=10)
+        cached_price, _ = market_cache.get_price(clean_symbol, allow_stale=True)
+        if cached_price is not None:
+            return cached_price, DataQualityEnum.PARTIAL
+        df, _ = await self.get_candles_df(clean_symbol, interval="15m", outputsize=10)
         if df is not None and not df.empty:
-            latest_close = float(df["close"].iloc[-1])
-            return latest_close, DataQualityEnum.PARTIAL
-
+            return float(df["close"].iloc[-1]), DataQualityEnum.PARTIAL
         return None, DataQualityEnum.POOR
 
 

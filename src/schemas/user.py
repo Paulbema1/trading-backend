@@ -77,3 +77,10 @@ class AdminUserListItem(BaseModel):
 
     class Config:
         from_attributes = True
+class SystemTimeframeResponse(BaseModel):
+    main_timeframe: str
+    confirmation_timeframe: str
+
+class SystemTimeframeUpdate(BaseModel):
+    main_timeframe: str
+    confirmation_timeframe: str
