@@ -1,0 +1,36 @@
+# Secrets / environnement
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p8
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environnements virtuels
+venv/
+.venv/
+env/
+
+# Base de données locale
+*.db
+*.sqlite3
+
+# Données historiques volumineuses (backtest) - à adapter si versionnées via LFS
+# data/historical/*.parquet
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

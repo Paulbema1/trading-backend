@@ -70,16 +70,20 @@ class NotificationService:
         title = f"{action_emoji} Signal {signal.action.value} — {signal.symbol}"
         body = self._format_signal_body(signal)
 
+        # Noms de champs alignés avec le contrat FCM du cahier des charges v9.1.0
+        # et avec FCMService.kt côté mobile (data["signal_id"], data["entry_price"], ...).
         data_payload = {
+            "signal_id": signal.signal_id or "",
             "symbol": signal.symbol,
             "action": signal.action.value,
             "confidence": str(signal.confidence),
             "score": str(signal.score),
-            "entry": str(signal.entry_price or ""),
-            "sl": str(signal.stop_loss or ""),
-            "tp1": str(signal.take_profit_1 or ""),
-            "tp2": str(signal.take_profit_2 or ""),
-            "tp3": str(signal.take_profit_3 or ""),
+            "data_quality": signal.data_quality.value,
+            "entry_price": str(signal.entry_price or ""),
+            "stop_loss": str(signal.stop_loss or ""),
+            "take_profit_1": str(signal.take_profit_1 or ""),
+            "take_profit_2": str(signal.take_profit_2 or ""),
+            "take_profit_3": str(signal.take_profit_3 or ""),
             "timeframe": signal.main_timeframe,
             "news_used": str(signal.news_used),
         }

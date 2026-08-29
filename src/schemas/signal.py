@@ -28,6 +28,7 @@ class DataQualityEnum(str, Enum):
 
 class SignalResponse(BaseModel):
     """Signal complet envoyé à l'app."""
+    signal_id: Optional[str] = None
     symbol: str
     action: ActionEnum
     confidence: int
@@ -66,6 +67,7 @@ class SignalResponse(BaseModel):
 class SignalHistoryItem(BaseModel):
     """Élément d'historique (version simplifiée)."""
     id: int
+    signal_id: Optional[str] = None
     symbol: str
     action: str
     score: int

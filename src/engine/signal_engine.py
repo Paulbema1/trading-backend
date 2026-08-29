@@ -1,5 +1,6 @@
 """TradeVision AI - moteur live : données -> scoring déterministe -> audit IA."""
 from typing import Dict
+import uuid
 import pandas as pd
 from datetime import timedelta, datetime, timezone
 from src.services.market_data import market_data_service
@@ -42,13 +43,17 @@ class SignalEngine:
         news=await news_service.analyze_sentiment(clean); cal=await economic_calendar_service.get_upcoming_events(clean)
         scored=deterministic_scoring_engine.evaluate(main,confirm,news,cal,confirm_tf=confirm_tf,as_of=now)
         action=scored["action"]; ai_confirmed=None; reasons=scored["reasons"]
-        levels={}
+        levels={}; signal_id=None
         if action != ActionEnum.WAIT:
             levels=self._calculate_levels(clean,action,float(price),float(scored["ta"]["indicators"].get("atr",0)))
             ai_confirmed,ai_reason=await ai_engine.validate_signal(clean,action.value,scored["score"],scored["breakdown"],reasons,news.get("summary",""))
             if not ai_confirmed:
                 action=ActionEnum.WAIT; reasons.append(f"Refus de sécurité IA : {ai_reason}")
+            else:
+                # UUID stable par signal, généré une seule fois côté backend (source de vérité)
+                # pour la déduplication et le suivi (API + FCM). N'affecte aucune règle de scoring.
+                signal_id = str(uuid.uuid4())
         quality=DataQualityEnum.PARTIAL if q_main==DataQualityEnum.PARTIAL or q_confirm==DataQualityEnum.PARTIAL or q_price==DataQualityEnum.PARTIAL else DataQualityEnum.GOOD
-        return SignalResponse(symbol=clean,action=action,confidence=scored["confidence"],score=scored["score"],entry_price=levels.get("entry_price"),stop_loss=levels.get("stop_loss"),take_profit_1=levels.get("take_profit_1"),take_profit_2=levels.get("take_profit_2"),take_profit_3=levels.get("take_profit_3"),risk_reward=levels.get("risk_reward"),main_timeframe=main_tf,confirmation_timeframe=confirm_tf,score_breakdown=scored["breakdown"],news_used=scored["news"]["news_used"],news_status=scored["news"]["status"],news_summary=scored["news"]["explanation"],data_quality=quality,ai_confirmed=ai_confirmed,reasons=" | ".join(reasons[:6]))
+        return SignalResponse(signal_id=signal_id,symbol=clean,action=action,confidence=scored["confidence"],score=scored["score"],entry_price=levels.get("entry_price"),stop_loss=levels.get("stop_loss"),take_profit_1=levels.get("take_profit_1"),take_profit_2=levels.get("take_profit_2"),take_profit_3=levels.get("take_profit_3"),risk_reward=levels.get("risk_reward"),main_timeframe=main_tf,confirmation_timeframe=confirm_tf,score_breakdown=scored["breakdown"],news_used=scored["news"]["news_used"],news_status=scored["news"]["status"],news_summary=scored["news"]["explanation"],data_quality=quality,ai_confirmed=ai_confirmed,reasons=" | ".join(reasons[:6]))
 
 signal_engine=SignalEngine()

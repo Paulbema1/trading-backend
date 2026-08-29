@@ -19,6 +19,7 @@ from src.core.config import (
     CORS_ORIGINS,
     SUPPORTED_ASSETS,
     DEFAULT_REFRESH_INTERVAL,
+    validate_production_security,
 )
 from src.core.database import init_db, SessionLocal
 from src.core.firebase import init_firebase
@@ -85,6 +86,9 @@ async def auto_scan_task():
 async def lifespan(app: FastAPI):
     logger.info(f"=== Démarrage de {APP_NAME} v{APP_VERSION} ===")
 
+    # Garde-fou sécurité : échoue immédiatement si production sans JWT_SECRET explicite.
+    validate_production_security()
+
     try:
         init_db()
         logger.info("Base de données initialisée avec succès.")
@@ -118,7 +122,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

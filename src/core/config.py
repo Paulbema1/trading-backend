@@ -18,8 +18,23 @@ from typing import List
 # ============================================================
 
 APP_NAME = "TradeVision AI"
-APP_VERSION = "9.0.0"
-STRATEGY_VERSION = "v9.0.0"
+APP_VERSION = "9.1.0"
+STRATEGY_VERSION = "v9.1.0"
+
+# ENVIRONMENT: "development" (default) or "production".
+# Utilisé uniquement pour activer des vérifications de sécurité strictes
+# (fail-fast JWT_SECRET) — n'affecte aucune règle métier/scoring.
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+
+
+def _clamp_env_int(var_name: str, default: int, min_value: int, max_value: int) -> int:
+    """Lit un entier depuis l'environnement et le borne à [min_value, max_value]."""
+    raw = os.getenv(var_name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    return max(min_value, min(max_value, value))
 
 
 # ============================================================
@@ -39,7 +54,7 @@ API_DESCRIPTION = (
 # TWELVE DATA
 # ============================================================
 
-TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
+TWELVE_DATA_BASE_URL = os.getenv("TWELVE_DATA_BASE_URL", "https://api.twelvedata.com").strip()
 
 TWELVE_DATA_API_KEY_1 = os.getenv("TWELVE_DATA_API_KEY_1", "").strip()
 TWELVE_DATA_API_KEY_2 = os.getenv("TWELVE_DATA_API_KEY_2", "").strip()
@@ -51,6 +66,11 @@ if not TWELVE_DATA_API_KEY_1:
 TWELVE_DATA_API_KEYS: List[str] = [
     key for key in (TWELVE_DATA_API_KEY_1, TWELVE_DATA_API_KEY_2) if key
 ]
+
+# Durées de cooldown/exhaustion — configurables, bornées à [60, 300] secondes
+# conformément au cahier des charges v9.1.0 (§3).
+TWELVE_DATA_COOLDOWN_SECONDS = _clamp_env_int("TWELVE_DATA_COOLDOWN_SECONDS", 60, 60, 300)
+TWELVE_DATA_EXHAUSTED_SECONDS = _clamp_env_int("TWELVE_DATA_EXHAUSTED_SECONDS", 300, 60, 300)
 
 
 # ============================================================
@@ -85,9 +105,25 @@ FIREBASE_PRIVATE_KEY = os.getenv("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n"
 # JWT / AUTHENTIFICATION
 # ============================================================
 
-JWT_SECRET = os.getenv("JWT_SECRET", "tradevision-super-secret-key-change-me")
+_INSECURE_JWT_DEFAULT = "tradevision-insecure-default-DO-NOT-USE-IN-PRODUCTION"
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip() or _INSECURE_JWT_DEFAULT
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+
+
+def validate_production_security() -> None:
+    """
+    Garde-fou de sécurité au démarrage : échoue immédiatement si l'application
+    est lancée en production sans JWT_SECRET explicite.
+
+    N'affecte aucune règle métier — vérification de configuration uniquement.
+    """
+    if ENVIRONMENT == "production" and JWT_SECRET == _INSECURE_JWT_DEFAULT:
+        raise RuntimeError(
+            "JWT_SECRET manquant ou vide en environnement de production. "
+            "Définissez la variable d'environnement JWT_SECRET avant de démarrer "
+            "l'application (voir .env.example)."
+        )
 
 
 # ============================================================
@@ -125,7 +161,8 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct
 # CORS & URLS EXTERNES
 # ============================================================
 
-CORS_ORIGINS = ["*"]
+_cors_env = os.getenv("CORS_ORIGINS", "*").strip()
+CORS_ORIGINS: List[str] = ["*"] if _cors_env == "*" else [o.strip() for o in _cors_env.split(",") if o.strip()]
 NEWS_RSS_URL = os.getenv("NEWS_RSS_URL", "").strip()
 ECONOMIC_CALENDAR_URL = os.getenv(
     "ECONOMIC_CALENDAR_URL",

@@ -11,6 +11,7 @@ class Signal(Base):
     __tablename__ = "signals"
 
     id = Column(Integer, primary_key=True, index=True)
+    signal_id = Column(String(36), nullable=True, index=True, unique=False)
     symbol = Column(String(20), nullable=False, index=True)
     action = Column(String(10), nullable=False)
     score = Column(Integer, nullable=False)

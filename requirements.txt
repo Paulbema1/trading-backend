@@ -11,3 +11,8 @@ numpy==2.1.0
 firebase-admin==6.5.0
 pydantic==2.9.0
 pyarrow==17.0.0
+
+# ── Tests (dev/CI uniquement) ────────────────────────────────
+pytest==8.3.3
+pytest-cov==5.0.0
+pytest-asyncio==0.24.0

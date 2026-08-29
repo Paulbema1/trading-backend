@@ -17,6 +17,8 @@ from enum import Enum
 from src.core.config import (
     TWELVE_DATA_BASE_URL,
     TWELVE_DATA_API_KEYS,
+    TWELVE_DATA_COOLDOWN_SECONDS,
+    TWELVE_DATA_EXHAUSTED_SECONDS,
 )
 from src.core.logging import get_logger
 
@@ -42,9 +44,6 @@ class ApiKeySlot:
         self.total_success = 0
         self.total_429 = 0
 
-    def is_ready() -> bool:
-        pass
-
     def is_ready(self) -> bool:
         """Vérifie si la clé peut être utilisée immédiatement."""
         return time.time() >= self.cooldown_until
@@ -56,7 +55,7 @@ class ApiKeySlot:
         self.total_requests += 1
         self.total_success += 1
 
-    def mark_429(self, cooldown_seconds: int = 60):
+    def mark_429(self, cooldown_seconds: int = TWELVE_DATA_COOLDOWN_SECONDS):
         """Applique un cooldown immédiat suite à un code 429."""
         self.consecutive_failures += 1
         self.total_requests += 1
@@ -65,7 +64,7 @@ class ApiKeySlot:
 
         if self.consecutive_failures >= 3:
             self.status = KeyStatus.EXHAUSTED
-            self.cooldown_until = time.time() + 300  # 5 min de pause
+            self.cooldown_until = time.time() + TWELVE_DATA_EXHAUSTED_SECONDS
         else:
             self.status = KeyStatus.DEGRADED
 
@@ -134,7 +133,7 @@ class RequestManager:
                     resp = await client.get(url, params=req_params)
 
                 if resp.status_code == 429:
-                    slot.mark_429(cooldown_seconds=60)
+                    slot.mark_429(cooldown_seconds=TWELVE_DATA_COOLDOWN_SECONDS)
                     attempts += 1
                     continue
 
@@ -146,7 +145,7 @@ class RequestManager:
                         error_msg = data.get("message", "")
 
                         if error_code == 429 or "api key" in error_msg.lower() or "limit" in error_msg.lower():
-                            slot.mark_429(cooldown_seconds=60)
+                            slot.mark_429(cooldown_seconds=TWELVE_DATA_COOLDOWN_SECONDS)
                             attempts += 1
                             continue
 
