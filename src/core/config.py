@@ -72,6 +72,16 @@ TWELVE_DATA_API_KEYS: List[str] = [
 TWELVE_DATA_COOLDOWN_SECONDS = _clamp_env_int("TWELVE_DATA_COOLDOWN_SECONDS", 60, 60, 300)
 TWELVE_DATA_EXHAUSTED_SECONDS = _clamp_env_int("TWELVE_DATA_EXHAUSTED_SECONDS", 300, 60, 300)
 
+# Anti-stacking (§24) : une position active expire automatiquement après ce délai
+# si aucun signal de direction opposée n'est survenu entretemps, pour éviter
+# qu'une tendance prolongée bloque indéfiniment tout nouveau signal sur un actif.
+POSITION_EXPIRY_HOURS = _clamp_env_int("POSITION_EXPIRY_HOURS", 5, 1, 168)
+
+# Délai (secondes) entre chaque actif lors de l'Auto-Scan, pour éviter de saturer
+# le quota Twelve Data en envoyant toutes les requêtes d'un coup (§3 du cahier
+# des charges). N'affecte aucune règle de scoring — orchestration uniquement.
+AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS = _clamp_env_int("AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS", 8, 0, 60)
+
 
 # ============================================================
 # OPENROUTER
