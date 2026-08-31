@@ -7,9 +7,7 @@ Prohibition absolue des données synthétiques/aléatoires.
 from pathlib import Path
 from typing import Optional
 import pandas as pd
-import httpx
 
-from src.core.config import TWELVE_DATA_BASE_URL, TWELVE_DATA_API_KEYS
 from src.utils.helpers import normalize_symbol
 from src.core.logging import get_logger
 
@@ -86,43 +84,56 @@ class HistoricalDataManager:
         interval: str = "1h",
         outputsize: int = 5000,
     ) -> Optional[pd.DataFrame]:
-        """Télécharge de vraies données historiques depuis Twelve Data."""
+        """
+        Télécharge de vraies données historiques depuis Twelve Data.
+
+        Utilise le RequestManager partagé (rotation automatique des 2 clés,
+        cooldown/429 gérés de façon centralisée) plutôt qu'une clé unique en
+        dur, pour rester cohérent avec le reste du système et supporter le
+        téléchargement de plusieurs actifs/timeframes à la suite sans
+        épuiser une seule clé.
+
+        outputsize=5000 est le maximum autorisé par requête Twelve Data :
+        à 1h cela couvre environ 208 jours (~7 mois), à 4h environ 833 jours
+        (~2.3 ans) — largement suffisant pour un backtest sur longue période.
+        """
+        # Import différé pour éviter toute dépendance circulaire avec request_manager.
+        from src.services.request_manager import request_manager
+
         clean_symbol = normalize_symbol(symbol)
         api_interval = self._normalize_interval(interval)
-        api_key = TWELVE_DATA_API_KEYS[0] if TWELVE_DATA_API_KEYS else None
 
-        if not api_key:
-            return None
-
-        url = f"{TWELVE_DATA_BASE_URL}/time_series"
         params = {
             "symbol": clean_symbol,
             "interval": api_interval,
             "outputsize": outputsize,
-            "apikey": api_key,
             "format": "JSON",
         }
 
+        data, error = await request_manager.execute_request("time_series", params, timeout=30.0)
+
+        if error or not data:
+            logger.error(f"Erreur téléchargement historique réel pour {clean_symbol} ({interval}) : {error}")
+            return None
+
+        if "values" not in data:
+            logger.error(f"Réponse Twelve Data sans 'values' pour {clean_symbol} ({interval}) : {data}")
+            return None
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.get(url, params=params)
+            df = pd.DataFrame(data["values"])
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            for col in ["open", "high", "low", "close"]:
+                df[col] = df[col].astype(float)
+            df["volume"] = pd.to_numeric(df.get("volume", 0.0), errors="coerce").fillna(0.0)
+            df = df.sort_values("datetime").reset_index(drop=True)
 
-            if resp.status_code == 200:
-                data = resp.json()
-                if "values" in data:
-                    df = pd.DataFrame(data["values"])
-                    df["datetime"] = pd.to_datetime(df["datetime"])
-                    for col in ["open", "high", "low", "close"]:
-                        df[col] = df[col].astype(float)
-                    df["volume"] = pd.to_numeric(df.get("volume", 0.0), errors="coerce").fillna(0.0)
-                    df = df.sort_values("datetime").reset_index(drop=True)
-
-                    self.save_data(clean_symbol, interval, df)
-                    return df
+            self.save_data(clean_symbol, interval, df)
+            return df
         except Exception as e:
-            logger.error(f"Erreur téléchargement historique réel : {e}")
-
-        return None
+            logger.error(f"Erreur traitement historique réel pour {clean_symbol} ({interval}) : {e}")
+            return None
 
 
 historical_data_manager = HistoricalDataManager()
+

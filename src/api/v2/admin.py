@@ -3,7 +3,7 @@ TradeVision AI - Espace Admin & Cockpit de Contrôle (v2).
 """
 
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi import APIRouter, Depends, Query, status, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
@@ -16,7 +16,7 @@ from src.services.request_manager import request_manager
 from src.utils.cache import market_cache
 from src.engine.signal_engine import signal_engine
 from src.services.signal_dispatch import persist_and_dispatch
-from src.core.config import SUPPORTED_ASSETS
+from src.core.config import SUPPORTED_ASSETS, SUPPORTED_TIMEFRAMES, AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -126,3 +126,65 @@ async def run_backtest_route(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur calcul backtest : {str(e)}"
         )
+
+
+@router.post("/download-historical-data", status_code=status.HTTP_200_OK)
+async def download_historical_data_route(
+    background_tasks: BackgroundTasks,
+    symbols: Optional[List[str]] = Query(default=None),
+    timeframes: Optional[List[str]] = Query(default=None),
+    admin: User = Depends(require_admin),
+):
+    """
+    Déclenche le téléchargement (en arrière-plan) des données historiques réelles
+    nécessaires au backtest, pour chaque combinaison actif/timeframe demandée.
+
+    À exécuter UNE FOIS (ou occasionnellement pour rafraîchir), PAS à chaque
+    backtest — le moteur de backtest lui-même n'a jamais le droit de télécharger
+    en direct (garde-fou no-look-ahead, voir historical_data.py). Cet endpoint
+    est le seul point d'entrée légitime pour peupler data/<SYMBOL>/<tf>.parquet.
+
+    Tourne en tâche de fond (BackgroundTasks) car l'opération complète prend
+    plusieurs minutes (16 combinaisons x espacement anti-quota) — largement
+    au-delà du timeout réseau du client mobile (30s). La progression est
+    consultable dans les logs serveur (Render).
+    """
+    from src.backtest.historical_data import historical_data_manager
+
+    target_symbols = symbols or SUPPORTED_ASSETS
+    target_timeframes = timeframes or SUPPORTED_TIMEFRAMES
+
+    for s in target_symbols:
+        if s not in SUPPORTED_ASSETS:
+            raise HTTPException(status_code=400, detail=f"Actif non supporté : {s}")
+    for tf in target_timeframes:
+        if not validate_timeframe(tf):
+            raise HTTPException(status_code=400, detail=f"Timeframe non supporté : {tf}")
+
+    async def _run_download():
+        import asyncio
+        success_count = 0
+        total = len(target_symbols) * len(target_timeframes)
+        logger.info(f"📥 Démarrage téléchargement historique ({total} combinaisons)...")
+        for symbol in target_symbols:
+            for tf in target_timeframes:
+                df = await historical_data_manager.download_historical_range(symbol, tf, outputsize=5000)
+                if df is not None and not df.empty:
+                    success_count += 1
+                    logger.info(f"✅ Historique téléchargé : {symbol} ({tf}) — {len(df)} bougies, {df['datetime'].min()} → {df['datetime'].max()}")
+                else:
+                    logger.warning(f"❌ Échec téléchargement historique : {symbol} ({tf}).")
+                await asyncio.sleep(AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS)
+        logger.info(f"📥 Téléchargement historique terminé : {success_count}/{total} combinaisons réussies.")
+
+    background_tasks.add_task(_run_download)
+
+    estimated_seconds = len(target_symbols) * len(target_timeframes) * (AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS + 1)
+    return {
+        "message": (
+            f"Téléchargement démarré en arrière-plan pour "
+            f"{len(target_symbols)} actif(s) x {len(target_timeframes)} timeframe(s). "
+            f"Durée estimée : ~{estimated_seconds // 60} min. Suivez la progression dans les logs."
+        ),
+    }
+
