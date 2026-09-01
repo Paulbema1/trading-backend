@@ -125,7 +125,14 @@ class HistoricalDataManager:
             df["datetime"] = pd.to_datetime(df["datetime"])
             for col in ["open", "high", "low", "close"]:
                 df[col] = df[col].astype(float)
-            df["volume"] = pd.to_numeric(df.get("volume", 0.0), errors="coerce").fillna(0.0)
+            # Le forex/or n'a pas de colonne "volume" dans la réponse Twelve Data
+            # (contrairement aux actions). df.get("volume", 0.0) sur un DataFrame
+            # sans cette colonne retourne le scalaire 0.0 (pas une Series), donc
+            # .fillna() plantait ("'float' object has no attribute 'fillna'").
+            if "volume" in df.columns:
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+            else:
+                df["volume"] = 0.0
             df = df.sort_values("datetime").reset_index(drop=True)
 
             self.save_data(clean_symbol, interval, df)
