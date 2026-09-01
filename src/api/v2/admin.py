@@ -22,6 +22,17 @@ from src.core.logging import get_logger
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["Administration & Télécommande"])
 
+# Stockage en mémoire des jobs de backtest en cours/terminés (clé = symbol|main_tf|confirm_tf).
+# Un backtest sur 5000 bougies dépasse largement les timeouts réseau mobile (30s) et
+# potentiellement ceux du proxy Render — il tourne donc en tâche de fond (comme le
+# téléchargement historique) et l'app interroge /admin/backtest-result pour suivre
+# la progression, sans jamais bloquer une requête HTTP en attente.
+_backtest_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _backtest_job_key(symbol: str, main_tf: str, confirm_tf: str) -> str:
+    return f"{symbol}|{main_tf}|{confirm_tf}"
+
 
 @router.get("/users", response_model=List[AdminUserListItem])
 def list_users(
@@ -95,6 +106,7 @@ async def trigger_full_market_scan(
 
 @router.post("/backtest", status_code=status.HTTP_200_OK)
 async def run_backtest_route(
+    background_tasks: BackgroundTasks,
     symbol: str = Query(default="EUR/USD"),
     main_tf: Optional[str] = Query(default=None),
     confirm_tf: Optional[str] = Query(default=None),
@@ -104,28 +116,70 @@ async def run_backtest_route(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    try:
-        from src.backtest.engine import backtest_engine
-        db_cfg = system_config_service.get(db)
-        effective_main_tf = main_tf or db_cfg.main_timeframe
-        effective_confirm_tf = confirm_tf or db_cfg.confirmation_timeframe
-        if not validate_timeframe(effective_main_tf) or not validate_timeframe(effective_confirm_tf):
-            raise HTTPException(status_code=400, detail="Timeframe non supporté.")
-        res = await backtest_engine.run_backtest(
-            symbol=symbol,
-            main_tf=effective_main_tf,
-            confirm_tf=effective_confirm_tf,
-            start_date=start_date,
-            end_date=end_date,
-            compounding=compounding,
-        )
-        return res
-    except Exception as e:
-        logger.error(f"Erreur Backtest : {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur calcul backtest : {str(e)}"
-        )
+    """
+    Démarre un backtest en ARRIÈRE-PLAN et retourne immédiatement.
+
+    Un backtest sur 5000 bougies (scoring déterministe complet à chaque pas)
+    dépasse largement le timeout réseau du client mobile (30s) et risque aussi
+    de dépasser le timeout du proxy Render. Le calcul tourne donc en tâche de
+    fond ; le résultat se récupère via GET /admin/backtest-result en interrogeant
+    régulièrement (polling), exactement comme /admin/download-historical-data.
+
+    N'affecte en rien la logique de scoring/backtest elle-même — uniquement
+    la façon dont le résultat est livré au client.
+    """
+    from src.backtest.engine import backtest_engine
+
+    db_cfg = system_config_service.get(db)
+    effective_main_tf = main_tf or db_cfg.main_timeframe
+    effective_confirm_tf = confirm_tf or db_cfg.confirmation_timeframe
+
+    if not validate_timeframe(effective_main_tf) or not validate_timeframe(effective_confirm_tf):
+        raise HTTPException(status_code=400, detail="Timeframe non supporté.")
+
+    job_key = _backtest_job_key(symbol, effective_main_tf, effective_confirm_tf)
+    _backtest_jobs[job_key] = {"status": "running", "result": None}
+
+    async def _run_backtest_job():
+        try:
+            res = await backtest_engine.run_backtest(
+                symbol=symbol,
+                main_tf=effective_main_tf,
+                confirm_tf=effective_confirm_tf,
+                start_date=start_date,
+                end_date=end_date,
+                compounding=compounding,
+            )
+            _backtest_jobs[job_key] = {"status": "done", "result": res}
+            logger.info(f"✅ Backtest terminé : {symbol} ({effective_main_tf}/{effective_confirm_tf}).")
+        except Exception as e:
+            logger.error(f"Erreur Backtest ({symbol}) : {e}")
+            _backtest_jobs[job_key] = {"status": "error", "result": {"error": str(e)}}
+
+    background_tasks.add_task(_run_backtest_job)
+
+    return {
+        "status": "started",
+        "symbol": symbol,
+        "main_tf": effective_main_tf,
+        "confirm_tf": effective_confirm_tf,
+        "message": "Backtest démarré en arrière-plan. Interrogez /admin/backtest-result pour suivre la progression.",
+    }
+
+
+@router.get("/backtest-result", status_code=status.HTTP_200_OK)
+async def get_backtest_result(
+    symbol: str = Query(default="EUR/USD"),
+    main_tf: str = Query(default="1h"),
+    confirm_tf: str = Query(default="4h"),
+    admin: User = Depends(require_admin),
+):
+    """Consulte l'état/résultat d'un backtest démarré via POST /admin/backtest."""
+    job_key = _backtest_job_key(symbol, main_tf, confirm_tf)
+    job = _backtest_jobs.get(job_key)
+    if job is None:
+        return {"status": "not_found", "result": None}
+    return job
 
 
 @router.post("/download-historical-data", status_code=status.HTTP_200_OK)
