@@ -62,15 +62,22 @@ class HistoricalDataManager:
             return None
 
     def save_data(self, symbol: str, interval: str, df: pd.DataFrame) -> bool:
+        """
+        Sauvegarde les données en écrasant directement le fichier existant.
+
+        Chaque téléchargement récupère déjà les 5000 dernières bougies (le
+        maximum autorisé par Twelve Data), qui couvrent et dépassent largement
+        les données précédemment stockées. Fusionner (lire l'ancien fichier +
+        concat + dedup + réécrire) à chaque sauvegarde double inutilement la
+        mémoire utilisée — problématique sur un plan Render à RAM limitée,
+        surtout en cas de nouvelles tentatives répétées. Écraser directement
+        est fonctionnellement équivalent ici et bien plus économe.
+        """
         if df is None or df.empty:
             return False
 
         file_path = self._get_file_path(symbol, interval)
         try:
-            if file_path.exists():
-                existing_df = pd.read_parquet(file_path)
-                df = pd.concat([existing_df, df]).drop_duplicates(subset=["datetime"]).sort_values("datetime")
-
             df.to_parquet(file_path, index=False, engine="pyarrow")
             logger.info(f"💾 Sauvegardé {len(df)} bougies réelles pour {symbol} ({interval}) dans {file_path}")
             return True
