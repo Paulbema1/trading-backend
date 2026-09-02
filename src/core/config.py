@@ -173,6 +173,16 @@ OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3-8b-instruct
 
 _cors_env = os.getenv("CORS_ORIGINS", "*").strip()
 CORS_ORIGINS: List[str] = ["*"] if _cors_env == "*" else [o.strip() for o in _cors_env.split(",") if o.strip()]
+
+# URL publique du service, utilisée par le mécanisme anti-veille (keep_alive_task).
+# RENDER_EXTERNAL_URL est fournie automatiquement par Render sur chaque service —
+# aucune configuration manuelle nécessaire. Fallback sur PUBLIC_URL (si défini
+# manuellement) puis sur l'URL connue du service en dernier recours.
+PUBLIC_URL = (
+    os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    or os.getenv("PUBLIC_URL", "").strip()
+    or "https://trading-backend-23od.onrender.com"
+)
 NEWS_RSS_URL = os.getenv("NEWS_RSS_URL", "").strip()
 ECONOMIC_CALENDAR_URL = os.getenv(
     "ECONOMIC_CALENDAR_URL",

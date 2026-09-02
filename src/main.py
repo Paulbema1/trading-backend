@@ -19,6 +19,8 @@ from src.core.config import (
     CORS_ORIGINS,
     SUPPORTED_ASSETS,
     DEFAULT_REFRESH_INTERVAL,
+    AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS,
+    PUBLIC_URL,
     validate_production_security,
 )
 from src.core.database import init_db, SessionLocal
@@ -41,11 +43,20 @@ _auto_scan_task = None
 
 
 async def keep_alive_task():
+    """
+    Anti-veille : ping périodique de la VRAIE URL publique du service.
+
+    Un ping vers 127.0.0.1 (boucle locale interne) ne quitte jamais le
+    conteneur et ne compte donc JAMAIS comme trafic externe pour Render —
+    le service se met quand même en veille après 15 min d'inactivité malgré
+    ce ping, ce qui causait les erreurs "timeout" observées après une période
+    sans utilisation (cold start > 30s, au-delà du timeout réseau mobile).
+    """
     while True:
         try:
             await asyncio.sleep(600)
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.get("http://127.0.0.1:10000/health")
+                await client.get(f"{PUBLIC_URL}/health")
             logger.debug("🔄 Anti-veille : Auto-ping exécuté.")
         except asyncio.CancelledError:
             break
@@ -69,6 +80,11 @@ async def auto_scan_task():
                     signal = await signal_engine.generate_signal(symbol=symbol, main_tf=cfg.main_timeframe, confirm_tf=cfg.confirmation_timeframe)
 
                     await persist_and_dispatch(signal, db)
+
+                    # Espacement entre chaque actif pour ne pas saturer le quota
+                    # Twelve Data (voir AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS).
+                    if AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS > 0:
+                        await asyncio.sleep(AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS)
 
             finally:
                 db.close()
@@ -146,3 +162,4 @@ def root():
 @app.get("/health", tags=["Santé"])
 def health():
     return {"status": "HEALTHY"}
+
