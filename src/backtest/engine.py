@@ -37,8 +37,15 @@ class StrictAuditedBacktestEngine:
             return {"error":f"Données historiques Parquet insuffisantes pour {clean} ({main_tf}/{confirm_tf}). Aucun téléchargement live n'est autorisé pendant un backtest.","data_source":"PARQUET_LOCAL_UNIQUEMENT","symbol":clean,"main_tf":main_tf}
         main["datetime"]=pd.to_datetime(main["datetime"]); confirm["datetime"]=pd.to_datetime(confirm["datetime"]) if confirm is not None else None
         trades=[]; i=100
+        # Fenêtre glissante bornée (600 bougies) au lieu de tout l'historique depuis
+        # le début : l'indicateur le plus long (EMA-200) converge bien avant cette
+        # limite (au-delà de ~500 bougies en arrière, contribution < 0.7%, sans effet
+        # sur un score final arrondi en entier). Sans cette borne, le calcul recopiait
+        # et retraitait un historique qui grandit jusqu'à 5000 lignes à CHAQUE bougie
+        # testée (~O(n²)), causant des backtests de près d'une heure sur un CPU limité.
+        BACKTEST_LOOKBACK_WINDOW = 600
         while i < len(main)-1:
-            current=main.iloc[:i+1].copy(); now=current["datetime"].iloc[-1]
+            current=main.iloc[max(0, i+1-BACKTEST_LOOKBACK_WINDOW):i+1].copy(); now=current["datetime"].iloc[-1]
             c=self._closed_confirm(confirm,confirm_tf,now)
             if c is None or len(c)<40: i+=1; continue
             news=historical_news_manager.get_news_context_at(clean, now.to_pydatetime())
@@ -58,3 +65,4 @@ class StrictAuditedBacktestEngine:
         metrics=BacktestResults.calculate_metrics(trades,compounding=compounding)
         return {"data_source":"DONNÉES HISTORIQUES RÉELLES PARQUET","symbol":clean,"main_tf":main_tf,"confirmation_tf":confirm_tf,"loaded_candles":len(main),"period":f"{main['datetime'].iloc[0]} -> {main['datetime'].iloc[-1]}","metrics":metrics,"trades":trades,"fundamental_data_available":bool(historical_news_manager.news_records or historical_news_manager.calendar_records)}
 backtest_engine=StrictAuditedBacktestEngine()
+
