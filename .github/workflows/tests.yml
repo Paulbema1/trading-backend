@@ -1,0 +1,45 @@
+name: Backend Tests
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      # Valeurs de test uniquement (aucun secret réel nécessaire pour les tests unitaires,
+      # qui utilisent une base SQLite en mémoire, pas Neon).
+      ENVIRONMENT: development
+      DATABASE_URL: sqlite:///./test_tradevision.db
+      JWT_SECRET: test-secret-not-for-production
+      TWELVE_DATA_API_KEY_1: test_key_1
+      TWELVE_DATA_API_KEY_2: test_key_2
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=src --cov-report=term-missing
+
+      - name: Fail build if tests failed
+        if: failure()
+        run: |
+          echo "❌ Des tests ont échoué — corrigez avant de fusionner/déployer."
+          exit 1
