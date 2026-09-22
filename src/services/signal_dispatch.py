@@ -5,6 +5,7 @@ from src.models.signal import Signal
 from src.models.position import OpenPosition
 from src.schemas.signal import SignalResponse
 from src.services.notifications import notification_service
+from src.core.config import POSITION_EXPIRY_HOURS
 from src.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -18,12 +19,29 @@ def row_fingerprint(row: Signal):
     return "|".join([row.symbol, row.action, str(row.score), str(row.entry_price), str(row.stop_loss), str(row.take_profit_2), row.main_timeframe, row.confirmation_timeframe or ""])
 
 
+def _is_expired(opened_at) -> bool:
+    """
+    Détermine si une position ouverte à `opened_at` a dépassé POSITION_EXPIRY_HOURS.
+
+    Certains backends (SQLite en particulier) renvoient une valeur naïve
+    (sans tzinfo) après un aller-retour en base : on la considère alors
+    comme UTC, cohérent avec `opened_at` toujours écrit en UTC ailleurs
+    dans ce module.
+    """
+    if opened_at is None:
+        return True
+    if opened_at.tzinfo is None:
+        opened_at = opened_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - opened_at) > timedelta(hours=POSITION_EXPIRY_HOURS)
+
+
 def _check_anti_stacking(signal: SignalResponse, db: Session) -> bool:
     """
     Applique la règle anti-stacking (§24) : une seule position active par symbole.
 
     - Si une position identique (même direction) est déjà active sur ce symbole
-      -> le nouveau signal est refusé (pas de doublon de position).
+      -> le nouveau signal est refusé, SAUF si cette position a expiré
+      (plus de POSITION_EXPIRY_HOURS), auquel cas elle est renouvelée.
     - Si une position de direction opposée est active
       -> elle est considérée clôturée (retournement) et la nouvelle position s'ouvre.
     - Sinon -> la position s'ouvre normalement.
@@ -40,6 +58,13 @@ def _check_anti_stacking(signal: SignalResponse, db: Session) -> bool:
         return True
 
     if existing.action == signal.action.value:
+        if _is_expired(existing.opened_at):
+            existing.signal_id = signal.signal_id
+            existing.opened_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(f"Anti-stacking : position {signal.action.value} expirée sur {signal.symbol}, nouveau signal même direction autorisé.")
+            return True
+
         logger.info(f"Anti-stacking : position {signal.action.value} déjà active sur {signal.symbol}, signal ignoré.")
         return False
 
