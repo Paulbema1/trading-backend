@@ -1,0 +1,41 @@
+name: Research - Threshold calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Actifs séparés par des virgules"
+        default: "EUR/USD,GBP/USD,USD/JPY,XAU/USD"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run threshold calibration
+        env:
+          TWELVE_DATA_API_KEY_1: ${{ secrets.TWELVE_DATA_API_KEY_1 }}
+          TWELVE_DATA_API_KEY_2: ${{ secrets.TWELVE_DATA_API_KEY_2 }}
+          ENVIRONMENT: development
+          PYTHONPATH: .
+          SYMBOLS: ${{ inputs.symbols }}
+        run: python research/threshold_walkforward.py
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-report
+          path: research/output/
