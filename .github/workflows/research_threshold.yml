@@ -28,6 +28,7 @@ jobs:
         env:
           TWELVE_DATA_API_KEY_1: ${{ secrets.TWELVE_DATA_API_KEY_1 }}
           TWELVE_DATA_API_KEY_2: ${{ secrets.TWELVE_DATA_API_KEY_2 }}
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           ENVIRONMENT: development
           PYTHONPATH: .
           SYMBOLS: ${{ inputs.symbols }}

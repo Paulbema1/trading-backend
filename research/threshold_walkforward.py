@@ -28,6 +28,15 @@ async def ensure(symbol, tf):
     df = historical_data_manager.load_data(symbol, tf)
     if df is not None and len(df) >= 100:
         return True
+    try:
+        from research.neon_store import get_conn, restore_local_parquet
+        conn = get_conn()
+        if restore_local_parquet(conn, symbol, tf):
+            conn.close()
+            return True
+        conn.close()
+    except Exception as e:
+        print(f"  (Neon indisponible pour {symbol} {tf} : {e})")
     df = await historical_data_manager.download_historical_range(symbol, tf, outputsize=5000)
     return df is not None
 
