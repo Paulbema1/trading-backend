@@ -39,7 +39,10 @@ async def fetch_full_history(symbol: str, interval: str) -> pd.DataFrame:
         df["datetime"] = pd.to_datetime(df["datetime"])
         for col in ["open", "high", "low", "close"]:
             df[col] = df[col].astype(float)
-        df["volume"] = pd.to_numeric(df.get("volume", 0.0), errors="coerce").fillna(0.0)
+        if "volume" in df.columns:
+            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+        else:
+            df["volume"] = 0.0
         df = df.sort_values("datetime").reset_index(drop=True)
 
         frames.append(df)
