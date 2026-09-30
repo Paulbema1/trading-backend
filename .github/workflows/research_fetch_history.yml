@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       symbols:
-        default: "XAU/USD"
+        default: "EUR/USD,GBP/USD,USD/JPY"
       timeframes:
         default: "1h,4h"
 
