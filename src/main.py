@@ -17,7 +17,7 @@ from src.core.config import (
     API_TITLE,
     API_DESCRIPTION,
     CORS_ORIGINS,
-    SUPPORTED_ASSETS,
+    AUTO_SCAN_ASSETS,
     DEFAULT_REFRESH_INTERVAL,
     AUTO_SCAN_DELAY_BETWEEN_ASSETS_SECONDS,
     PUBLIC_URL,
@@ -76,7 +76,7 @@ async def auto_scan_task():
             db = SessionLocal()
             try:
                 cfg = system_config_service.get(db)
-                for symbol in SUPPORTED_ASSETS:
+                for symbol in AUTO_SCAN_ASSETS:
                     signal = await signal_engine.generate_signal(symbol=symbol, main_tf=cfg.main_timeframe, confirm_tf=cfg.confirmation_timeframe)
 
                     await persist_and_dispatch(signal, db)

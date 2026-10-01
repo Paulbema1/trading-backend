@@ -147,6 +147,15 @@ SUPPORTED_ASSETS = [
     "XAU/USD",
 ]
 
+# Actifs scannés automatiquement (signaux + push). Par défaut : XAU/USD seul,
+# seul actif validé en calibrage train/test sur ~6,7 ans. Surchargeable via
+# la variable d'environnement AUTO_SCAN_ASSETS (liste séparée par des virgules).
+AUTO_SCAN_ASSETS = [
+    a.strip()
+    for a in os.getenv("AUTO_SCAN_ASSETS", "XAU/USD").split(",")
+    if a.strip() in SUPPORTED_ASSETS
+]
+
 SUPPORTED_TIMEFRAMES = [
     "15m",
     "30m",
