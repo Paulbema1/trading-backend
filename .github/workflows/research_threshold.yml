@@ -6,6 +6,9 @@ on:
       symbols:
         description: "Actifs séparés par des virgules"
         default: "EUR/USD,GBP/USD,USD/JPY,XAU/USD"
+      variant:
+        description: "baseline, ob (Order Blocks améliorés) ou ob_sr (OB + zones support/résistance)"
+        default: "baseline"
 
 jobs:
   run:
@@ -32,11 +35,12 @@ jobs:
           ENVIRONMENT: development
           PYTHONPATH: .
           SYMBOLS: ${{ inputs.symbols }}
+          VARIANT: ${{ inputs.variant }}
         run: python research/threshold_walkforward.py
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: threshold-report
+          name: threshold-report-${{ inputs.variant }}
           path: research/output/
