@@ -23,6 +23,11 @@ if VARIANT in ("ob", "ob_sr"):
     from research.smc_experiment import ExperimentalSMC
     _ds.smc_engine = ExperimentalSMC(VARIANT)
 MAIN_TF, CONFIRM_TF = "1h", "4h"
+CALENDAR = os.getenv("CALENDAR", "none").strip()
+if CALENDAR == "fred":
+    # Calendrier économique réel (FRED) : écrit calendar.parquet, lu ensuite par le moteur.
+    from research.fred_calendar import build_calendar_parquet
+    build_calendar_parquet(historical_data_manager.base_dir)
 THRESHOLDS = [70, 75, 80, 85]
 TRAIN_RATIO = 0.7
 MIN_TRAIN, MIN_TEST = 30, 15
@@ -88,9 +93,9 @@ async def main():
             rows.append(row)
             print(f"  seuil {th}: train {train['n']}t PF {train['pf']:.2f} | test {test['n']}t PF {test['pf']:.2f} -> {row['verdict']}", flush=True)
 
-    (OUT / f"threshold_walkforward_{VARIANT}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
+    (OUT / f"threshold_walkforward_{VARIANT}_{CALENDAR}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
 
-    md = [f"## Calibrage du seuil (entraînement 70 % / test 30 %) - variante : {VARIANT}", "",
+    md = [f"## Calibrage du seuil (entraînement 70 % / test 30 %) - variante : {VARIANT} / calendrier : {CALENDAR}", "",
           "| Actif | Seuil | Train n | Train PF | Test n | Test PF | Test exp (R) | Verdict |",
           "|---|---|---|---|---|---|---|---|"]
     for r in rows:
@@ -99,7 +104,7 @@ async def main():
     md += ["", "Limites : une seule fenêtre de données (~7 mois), filtrage a posteriori des trades, "
            "pas de validation IA dans le backtest, news/calendrier neutralisés (aucune donnée historique)."]
     text = "\n".join(md)
-    (OUT / f"threshold_walkforward_{VARIANT}.md").write_text(text, encoding="utf-8")
+    (OUT / f"threshold_walkforward_{VARIANT}_{CALENDAR}.md").write_text(text, encoding="utf-8")
     summary = os.getenv("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:

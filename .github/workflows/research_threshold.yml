@@ -9,6 +9,9 @@ on:
       variant:
         description: "baseline, ob (Order Blocks améliorés) ou ob_sr (OB + zones support/résistance)"
         default: "baseline"
+      calendar:
+        description: "none (actuel) ou fred (calendrier économique réel USD)"
+        default: "none"
 
 jobs:
   run:
@@ -36,11 +39,13 @@ jobs:
           PYTHONPATH: .
           SYMBOLS: ${{ inputs.symbols }}
           VARIANT: ${{ inputs.variant }}
+          CALENDAR: ${{ inputs.calendar }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python research/threshold_walkforward.py
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: threshold-report-${{ inputs.variant }}
+          name: threshold-report-${{ inputs.variant }}-${{ inputs.calendar }}
           path: research/output/
