@@ -71,8 +71,27 @@ def verdict(tr, te):
     return "rejeté"
 
 
+COSTS = [float(x) for x in os.getenv("COSTS", "0,0.2,0.5,1.0").split(",") if x.strip()]
+
+
+def apply_cost(trades, cost):
+    """Retire un coût aller-retour (spread + slippage, en unités de prix) de chaque trade, en R.
+    Distance du stop retrouvée à partir du trade : |sortie - entrée| / |R|."""
+    out = []
+    for t in trades:
+        t2 = dict(t)
+        r = float(t["r_multiple"])
+        if abs(r) > 0.05:
+            risk = abs(float(t["exit_price"]) - float(t["entry_price"])) / abs(r)
+            if risk > 0:
+                t2["r_multiple"] = r - cost / risk
+        out.append(t2)
+    return out
+
+
 async def main():
     rows = []
+    cost_rows = []
     for symbol in SYMBOLS:
         print(f"=== {symbol} ===", flush=True)
         if not (await ensure(symbol, MAIN_TF) and await ensure(symbol, CONFIRM_TF)):
@@ -92,6 +111,12 @@ async def main():
             row = {"symbol": symbol, "seuil": th, "train": train, "test": test, "verdict": verdict(train, test)}
             rows.append(row)
             print(f"  seuil {th}: train {train['n']}t PF {train['pf']:.2f} | test {test['n']}t PF {test['pf']:.2f} -> {row['verdict']}", flush=True)
+            for cst in COSTS:
+                cost_rows.append({
+                    "symbol": symbol, "seuil": th, "cout": cst,
+                    "train": metrics(apply_cost([t for t, ts in sel if ts <= cut], cst)),
+                    "test": metrics(apply_cost([t for t, ts in sel if ts > cut], cst)),
+                })
 
     (OUT / f"threshold_walkforward_{VARIANT}_{CALENDAR}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
 
@@ -101,6 +126,13 @@ async def main():
     for r in rows:
         md.append(f"| {r['symbol']} | {r['seuil']} | {r['train']['n']} | {r['train']['pf']:.2f} | "
                   f"{r['test']['n']} | {r['test']['pf']:.2f} | {r['test']['exp']:+.2f} | {r['verdict']} |")
+    if cost_rows:
+        md += ["", "### Impact des coûts (aller-retour par trade, en unités de prix)", "",
+               "| Actif | Seuil | Coût | Train PF | Train exp (R) | Test n | Test PF | Test exp (R) |",
+               "|---|---|---|---|---|---|---|---|"]
+        for r in cost_rows:
+            md.append(f"| {r['symbol']} | {r['seuil']} | {r['cout']} | {r['train']['pf']:.2f} | "
+                      f"{r['train']['exp']:+.2f} | {r['test']['n']} | {r['test']['pf']:.2f} | {r['test']['exp']:+.2f} |")
     md += ["", "Limites : une seule fenêtre de données (~7 mois), filtrage a posteriori des trades, "
            "pas de validation IA dans le backtest, news/calendrier neutralisés (aucune donnée historique)."]
     text = "\n".join(md)

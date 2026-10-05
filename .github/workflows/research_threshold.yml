@@ -12,6 +12,9 @@ on:
       calendar:
         description: "none (actuel) ou fred (calendrier économique réel USD)"
         default: "none"
+      costs:
+        description: "coûts aller-retour à tester, en dollars pour l'or (séparés par des virgules)"
+        default: "0,0.2,0.5,1.0"
 
 jobs:
   run:
@@ -41,6 +44,7 @@ jobs:
           VARIANT: ${{ inputs.variant }}
           CALENDAR: ${{ inputs.calendar }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          COSTS: ${{ inputs.costs }}
         run: python research/threshold_walkforward.py
 
       - name: Upload report
