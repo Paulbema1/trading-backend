@@ -89,9 +89,37 @@ def apply_cost(trades, cost):
     return out
 
 
+DETAIL_TH = float(os.getenv("DETAIL_THRESHOLD", "70"))
+DETAIL_COST = float(os.getenv("DETAIL_COST", "0.5"))
+
+
+def detail_lines(symbol, sel):
+    """Gagnants / perdants par année et par sens, au seuil DETAIL_TH, avec coût DETAIL_COST."""
+    net = apply_cost([t for t, _ in sel], DETAIL_COST)
+    groups = {}
+    for (t, ts), tn in zip(sel, net):
+        for key in (str(ts.year), "Total " + str(t["action"]), "Total"):
+            g = groups.setdefault(key, {"n": 0, "w": 0, "l": 0, "gross": 0.0, "net": 0.0})
+            g["n"] += 1
+            g["w"] += 1 if t["result"] == "WIN" else 0
+            g["l"] += 1 if t["result"] == "LOSS" else 0
+            g["gross"] += float(t["r_multiple"])
+            g["net"] += float(tn["r_multiple"])
+    lines = ["", f"### Détail {symbol} - seuil {DETAIL_TH:g}, coût {DETAIL_COST} (tous les trades, toute la période)", "",
+             "| Période | Trades | Gagnants | Perdants | Taux de réussite | R brut total | R net total | Exp. nette (R) |",
+             "|---|---|---|---|---|---|---|---|"]
+    for key in sorted(groups, key=lambda k: (k.startswith("Total"), k)):
+        g = groups[key]
+        wr = 100.0 * g["w"] / g["n"] if g["n"] else 0.0
+        lines.append(f"| {key} | {g['n']} | {g['w']} | {g['l']} | {wr:.1f} % | {g['gross']:+.1f} | "
+                     f"{g['net']:+.1f} | {g['net'] / g['n']:+.2f} |")
+    return lines
+
+
 async def main():
     rows = []
     cost_rows = []
+    detail_sels = []
     for symbol in SYMBOLS:
         print(f"=== {symbol} ===", flush=True)
         if not (await ensure(symbol, MAIN_TF) and await ensure(symbol, CONFIRM_TF)):
@@ -106,6 +134,8 @@ async def main():
         cut = times.min() + (times.max() - times.min()) * TRAIN_RATIO
         for th in THRESHOLDS:
             sel = [(t, ts) for t, ts in zip(trades, times) if t["score"] >= th]
+            if th == DETAIL_TH:
+                detail_sels.append((symbol, sel))
             train = metrics([t for t, ts in sel if ts <= cut])
             test = metrics([t for t, ts in sel if ts > cut])
             row = {"symbol": symbol, "seuil": th, "train": train, "test": test, "verdict": verdict(train, test)}
@@ -126,6 +156,8 @@ async def main():
     for r in rows:
         md.append(f"| {r['symbol']} | {r['seuil']} | {r['train']['n']} | {r['train']['pf']:.2f} | "
                   f"{r['test']['n']} | {r['test']['pf']:.2f} | {r['test']['exp']:+.2f} | {r['verdict']} |")
+    for _sym, _sel in detail_sels:
+        md += detail_lines(_sym, _sel)
     if cost_rows:
         md += ["", "### Impact des coûts (aller-retour par trade, en unités de prix)", "",
                "| Actif | Seuil | Coût | Train PF | Train exp (R) | Test n | Test PF | Test exp (R) |",
